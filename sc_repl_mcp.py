@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 
 from mcp.server.fastmcp import FastMCP
-from pythonosc import udp_client, osc_server, dispatcher
+from pythonosc import osc_server, dispatcher, osc_message_builder
 
 
 SCSYNTH_HOST = "127.0.0.1"
@@ -34,12 +34,23 @@ class SCClient:
     """Client for communicating with scsynth via OSC."""
 
     def __init__(self):
-        self.client: udp_client.SimpleUDPClient | None = None
+        self._connected = False
         self.status = ServerStatus()
         self._status_event = threading.Event()
         self._reply_server: osc_server.ThreadingOSCUDPServer | None = None
         self._node_id = 1000
         self._node_lock = threading.Lock()
+        self._scsynth_addr = (SCSYNTH_HOST, SCSYNTH_PORT)
+
+    def _send_message(self, address: str, args: list):
+        """Send an OSC message to scsynth using the reply server's socket."""
+        if not self._reply_server:
+            return
+        builder = osc_message_builder.OscMessageBuilder(address=address)
+        for arg in args:
+            builder.add_arg(arg)
+        msg = builder.build()
+        self._reply_server.socket.sendto(msg.dgram, self._scsynth_addr)
 
     def _handle_status_reply(self, address: str, *args):
         """Handle /status.reply from scsynth."""
@@ -72,9 +83,7 @@ class SCClient:
             self._reply_server = None
 
         try:
-            self.client = udp_client.SimpleUDPClient(SCSYNTH_HOST, SCSYNTH_PORT)
-
-            # Set up OSC reply server
+            # Set up OSC reply server FIRST (it binds to REPLY_PORT)
             disp = dispatcher.Dispatcher()
             disp.map("/status.reply", self._handle_status_reply)
             disp.map("/done", self._handle_done)
@@ -86,7 +95,7 @@ class SCClient:
             thread = threading.Thread(target=self._reply_server.serve_forever, daemon=True)
             thread.start()
 
-            # Query status to verify connection
+            # Query status to verify connection (uses the same socket for send/receive)
             status = self.get_status()
             if status.running:
                 return True, f"Connected to scsynth on port {SCSYNTH_PORT}"
@@ -98,12 +107,12 @@ class SCClient:
 
     def get_status(self) -> ServerStatus:
         """Query server status."""
-        if not self.client:
+        if not self._reply_server:
             return ServerStatus(running=False)
 
         try:
             self._status_event.clear()
-            self.client.send_message("/status", [])
+            self._send_message("/status", [])
 
             # Wait for reply with timeout
             if self._status_event.wait(timeout=1.0):
@@ -121,14 +130,14 @@ class SCClient:
 
     def play_sine(self, freq: float = 440.0, amp: float = 0.1, dur: float = 1.0) -> tuple[bool, str]:
         """Play a sine wave using scsynth's default synthdef."""
-        if not self.client:
+        if not self._reply_server:
             return False, "Not connected to scsynth. Call sc_connect first."
 
         try:
             node_id = self._next_node_id()
 
             # Use s_new to create a synth with the "default" synthdef
-            self.client.send_message("/s_new", [
+            self._send_message("/s_new", [
                 "default",  # synthdef name
                 node_id,    # node ID
                 0,          # add action (0 = add to head)
@@ -141,8 +150,8 @@ class SCClient:
             def release_later():
                 import time
                 time.sleep(dur)
-                if self.client:
-                    self.client.send_message("/n_set", [node_id, "gate", 0])
+                if self._reply_server:
+                    self._send_message("/n_set", [node_id, "gate", 0])
 
             threading.Thread(target=release_later, daemon=True).start()
 
@@ -153,11 +162,11 @@ class SCClient:
 
     def free_all(self) -> tuple[bool, str]:
         """Free all synths."""
-        if not self.client:
+        if not self._reply_server:
             return False, "Not connected to scsynth"
 
         try:
-            self.client.send_message("/g_freeAll", [0])
+            self._send_message("/g_freeAll", [0])
             return True, "All synths freed"
         except Exception as e:
             return False, f"Failed to free synths: {e}"
@@ -167,7 +176,6 @@ class SCClient:
         if self._reply_server:
             self._reply_server.shutdown()
             self._reply_server = None
-        self.client = None
 
 
 # Global client instance
