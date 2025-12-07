@@ -86,9 +86,6 @@ class SCClient:
             thread = threading.Thread(target=self._reply_server.serve_forever, daemon=True)
             thread.start()
 
-            # Register to receive notifications
-            self.client.send_message("/notify", [1, 0])
-
             # Query status to verify connection
             status = self.get_status()
             if status.running:
