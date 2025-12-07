@@ -34,23 +34,29 @@ class SCClient:
     """Client for communicating with scsynth via OSC."""
 
     def __init__(self):
-        self._connected = False
         self.status = ServerStatus()
         self._status_event = threading.Event()
         self._reply_server: osc_server.ThreadingOSCUDPServer | None = None
-        self._node_id = 1000
+        self._node_id = 100000  # Start high to avoid collision with sclang's node IDs
         self._node_lock = threading.Lock()
         self._scsynth_addr = (SCSYNTH_HOST, SCSYNTH_PORT)
 
-    def _send_message(self, address: str, args: list):
-        """Send an OSC message to scsynth using the reply server's socket."""
+    def _send_message(self, address: str, args: list) -> bool:
+        """Send an OSC message to scsynth using the reply server's socket.
+
+        Returns True if message was sent, False otherwise.
+        """
         if not self._reply_server:
-            return
-        builder = osc_message_builder.OscMessageBuilder(address=address)
-        for arg in args:
-            builder.add_arg(arg)
-        msg = builder.build()
-        self._reply_server.socket.sendto(msg.dgram, self._scsynth_addr)
+            return False
+        try:
+            builder = osc_message_builder.OscMessageBuilder(address=address)
+            for arg in args:
+                builder.add_arg(arg)
+            msg = builder.build()
+            self._reply_server.socket.sendto(msg.dgram, self._scsynth_addr)
+            return True
+        except Exception:
+            return False
 
     def _handle_status_reply(self, address: str, *args):
         """Handle /status.reply from scsynth."""
@@ -133,43 +139,45 @@ class SCClient:
         if not self._reply_server:
             return False, "Not connected to scsynth. Call sc_connect first."
 
-        try:
-            node_id = self._next_node_id()
+        # Validate parameters
+        if freq <= 0:
+            return False, f"Frequency must be positive, got {freq}"
+        if not 0 < amp <= 1.0:
+            return False, f"Amplitude must be between 0 and 1, got {amp}"
+        if dur <= 0:
+            return False, f"Duration must be positive, got {dur}"
 
-            # Use s_new to create a synth with the "default" synthdef
-            self._send_message("/s_new", [
-                "default",  # synthdef name
-                node_id,    # node ID
-                0,          # add action (0 = add to head)
-                0,          # target group (0 = default group)
-                "freq", freq,
-                "amp", amp,
-            ])
+        node_id = self._next_node_id()
 
-            # Schedule release in a background thread
-            def release_later():
-                import time
-                time.sleep(dur)
-                if self._reply_server:
-                    self._send_message("/n_set", [node_id, "gate", 0])
+        # Use s_new to create a synth with the "default" synthdef
+        if not self._send_message("/s_new", [
+            "default",  # synthdef name
+            node_id,    # node ID
+            0,          # add action (0 = add to head)
+            0,          # target group (0 = default group)
+            "freq", freq,
+            "amp", amp,
+        ]):
+            return False, "Failed to send OSC message to scsynth"
 
-            threading.Thread(target=release_later, daemon=True).start()
+        # Schedule release in a background thread
+        def release_later():
+            import time
+            time.sleep(dur)
+            self._send_message("/n_set", [node_id, "gate", 0])
 
-            return True, f"Playing {freq}Hz sine wave for {dur}s"
+        threading.Thread(target=release_later, daemon=True).start()
 
-        except Exception as e:
-            return False, f"Failed to play sine: {e}"
+        return True, f"Playing {freq}Hz sine wave for {dur}s"
 
     def free_all(self) -> tuple[bool, str]:
         """Free all synths."""
         if not self._reply_server:
             return False, "Not connected to scsynth"
 
-        try:
-            self._send_message("/g_freeAll", [0])
+        if self._send_message("/g_freeAll", [0]):
             return True, "All synths freed"
-        except Exception as e:
-            return False, f"Failed to free synths: {e}"
+        return False, "Failed to send OSC message to scsynth"
 
     def disconnect(self):
         """Disconnect from server."""
