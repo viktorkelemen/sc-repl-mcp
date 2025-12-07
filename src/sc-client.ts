@@ -46,17 +46,27 @@ class SCClient {
       // Boot sclang interpreter with explicit path
       this.lang = await bootLang({ sclang: SCLANG_PATH });
 
-      // Boot the audio server and wait for it to be fully ready
+      // Boot the audio server only if not already running
       const bootResult = await this.interpret(`
-        s.waitForBoot {
-          s.sync;
-          "SERVER_READY"
-        };
+        if(s.serverRunning) {
+          "SERVER_ALREADY_RUNNING"
+        } {
+          s.waitForBoot {
+            s.sync;
+            "SERVER_READY"
+          };
+        }
       `, 30000); // 30 second timeout for server boot
 
       if (bootResult.success) {
         this.serverBooted = true;
-        return { success: true, message: "SuperCollider server booted successfully" };
+        const alreadyRunning = bootResult.result?.includes("ALREADY_RUNNING");
+        return {
+          success: true,
+          message: alreadyRunning
+            ? "Connected to existing SuperCollider server"
+            : "SuperCollider server booted successfully"
+        };
       } else {
         return { success: false, message: bootResult.error || "Failed to boot server" };
       }
