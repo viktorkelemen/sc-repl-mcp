@@ -43,13 +43,12 @@ class SCClient {
       // Boot sclang interpreter
       this.lang = await bootLang();
 
-      // Boot the audio server and wait for it
+      // Boot the audio server and wait for it to be fully ready
       const bootResult = await this.interpret(`
-        s.boot;
         s.waitForBoot {
-          "SERVER_BOOTED".postln;
+          s.sync;
+          "SERVER_READY"
         };
-        "LANG_READY"
       `, 30000); // 30 second timeout for server boot
 
       if (bootResult.success) {
@@ -86,11 +85,26 @@ class SCClient {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+
+      // Detect if sclang process has crashed
+      if (message.includes("EPIPE") || message.includes("killed") || message.includes("ECONNRESET")) {
+        this.handleCrash();
+        return {
+          success: false,
+          error: "sclang process crashed. Call sc_boot to restart."
+        };
+      }
+
       return {
         success: false,
         error: message
       };
     }
+  }
+
+  private handleCrash(): void {
+    this.lang = null;
+    this.serverBooted = false;
   }
 
   async getStatus(): Promise<SCStatus> {
@@ -102,7 +116,6 @@ class SCClient {
       // Query server status via sclang
       const result = await this.interpret(`
         if(s.serverRunning) {
-          var status = s.status;
           "running:true,ugens:%,synths:%,groups:%,synthdefs:%,avgCPU:%,peakCPU:%,sampleRate:%".format(
             s.numUGens, s.numSynths, s.numGroups, s.numSynthDefs,
             s.avgCPU.round(0.01), s.peakCPU.round(0.01), s.sampleRate
