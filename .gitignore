@@ -1,4 +1,12 @@
-node_modules/
-dist/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+
+# Logs
 *.log
+
+# OS
 .DS_Store

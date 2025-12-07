@@ -1,0 +1,16 @@
+[project]
+name = "sc-repl-mcp"
+version = "1.0.0"
+description = "MCP server for SuperCollider REPL integration"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "python-osc>=1.8.0",
+]
+
+[project.scripts]
+sc-repl-mcp = "sc_repl_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
