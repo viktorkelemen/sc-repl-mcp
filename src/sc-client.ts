@@ -1,5 +1,8 @@
 import { boot as bootLang } from "@supercollider/lang";
 
+// Path to sclang executable (macOS default)
+const SCLANG_PATH = process.env.SCLANG_PATH || "/Applications/SuperCollider.app/Contents/MacOS/sclang";
+
 // Type for the SCLang instance returned by boot()
 interface SCLangInstance {
   isReady(): boolean;
@@ -40,8 +43,8 @@ class SCClient {
     }
 
     try {
-      // Boot sclang interpreter
-      this.lang = await bootLang();
+      // Boot sclang interpreter with explicit path
+      this.lang = await bootLang({ sclang: SCLANG_PATH });
 
       // Boot the audio server and wait for it to be fully ready
       const bootResult = await this.interpret(`
