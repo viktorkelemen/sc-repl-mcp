@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -176,6 +177,7 @@ class SCClient:
 
         # Persistent sclang process for SynthDefs and OSC forwarding
         self._sclang_process: Optional[subprocess.Popen] = None
+        self._sclang_init_file: Optional[str] = None  # Temp file for init code
 
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
@@ -281,9 +283,18 @@ class SCClient:
             return False, "sclang not found"
 
         try:
-            # Start sclang with the init code
+            # Write init code to a temp file (sclang doesn't support -e flag)
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.scd',
+                delete=False,
+            ) as f:
+                f.write(SCLANG_INIT_CODE)
+                self._sclang_init_file = f.name
+
+            # Start sclang with the init file
             self._sclang_process = subprocess.Popen(
-                [sclang, "-e", SCLANG_INIT_CODE],
+                [sclang, self._sclang_init_file],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -297,13 +308,24 @@ class SCClient:
                 # Process exited, get error output
                 _, stderr = self._sclang_process.communicate()
                 self._sclang_process = None
+                self._cleanup_sclang_init_file()
                 return False, f"sclang exited unexpectedly: {stderr[:500]}"
 
             return True, "sclang started with SynthDefs and OSC forwarding"
 
         except Exception as e:
             self._sclang_process = None
+            self._cleanup_sclang_init_file()
             return False, f"Failed to start sclang: {e}"
+
+    def _cleanup_sclang_init_file(self):
+        """Remove the temporary init file."""
+        if self._sclang_init_file:
+            try:
+                os.unlink(self._sclang_init_file)
+            except OSError:
+                pass
+            self._sclang_init_file = None
 
     def _stop_sclang(self):
         """Stop the persistent sclang process."""
@@ -316,6 +338,7 @@ class SCClient:
             except Exception:
                 pass
             self._sclang_process = None
+        self._cleanup_sclang_init_file()
 
     def connect(self) -> tuple[bool, str]:
         """Connect to scsynth server and start sclang for SynthDefs."""
@@ -692,38 +715,62 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     if not sclang:
         return False, "sclang not found. Make sure SuperCollider is installed and sclang is in PATH or at standard location."
 
+    # sclang doesn't support -e flag, so we write code to a temp file
+    # Ensure code ends with semicolon, then append 0.exit to exit after execution
+    code_stripped = code.rstrip()
+    if not code_stripped.endswith(';'):
+        code_stripped += ';'
+    code_with_exit = code_stripped + "\n0.exit;\n"
+
     try:
-        # Run sclang with -e flag to execute code and exit
-        result = subprocess.run(
-            [sclang, "-e", code],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        # Create a temporary .scd file
+        with tempfile.NamedTemporaryFile(
+            mode='w',
+            suffix='.scd',
+            delete=False,
+        ) as f:
+            f.write(code_with_exit)
+            temp_path = f.name
 
-        # Combine stdout and stderr
-        output_parts = []
-        if result.stdout.strip():
-            output_parts.append(result.stdout.strip())
-        if result.stderr.strip():
-            # Filter out common sclang startup noise using prefix matching
-            stderr_lines = []
-            for line in result.stderr.strip().split('\n'):
-                stripped = line.strip()
-                # Skip lines that start with known noise prefixes
-                if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
-                    continue
-                stderr_lines.append(line)
-            if stderr_lines:
-                output_parts.append("stderr: " + '\n'.join(stderr_lines))
+        try:
+            # Run sclang with the temp file
+            result = subprocess.run(
+                [sclang, temp_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
 
-        output = '\n'.join(output_parts) if output_parts else "(no output)"
+            # Combine stdout and stderr
+            output_parts = []
+            if result.stdout.strip():
+                output_parts.append(result.stdout.strip())
+            if result.stderr.strip():
+                # Filter out common sclang startup noise using prefix matching
+                stderr_lines = []
+                for line in result.stderr.strip().split('\n'):
+                    stripped = line.strip()
+                    # Skip lines that start with known noise prefixes
+                    if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
+                        continue
+                    stderr_lines.append(line)
+                if stderr_lines:
+                    output_parts.append("stderr: " + '\n'.join(stderr_lines))
 
-        # Non-zero return code indicates error
-        if result.returncode != 0:
-            return False, f"sclang exited with code {result.returncode}\n{output}"
+            output = '\n'.join(output_parts) if output_parts else "(no output)"
 
-        return True, output
+            # Non-zero return code indicates error (but 0.exit returns 0)
+            if result.returncode != 0:
+                return False, f"sclang exited with code {result.returncode}\n{output}"
+
+            return True, output
+
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
     except subprocess.TimeoutExpired:
         return False, f"sclang execution timed out after {timeout}s"
