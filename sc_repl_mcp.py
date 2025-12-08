@@ -6,13 +6,16 @@ Uses OSC to communicate directly with scsynth.
 
 import atexit
 import math
+import os
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from pythonosc import osc_server, dispatcher, osc_message_builder
@@ -292,6 +295,80 @@ class SCClient:
 
         return True, f"Playing {freq}Hz sine wave for {dur}s"
 
+    def play_synth(
+        self,
+        synthdef: str,
+        params: Optional[dict[str, Any]] = None,
+        dur: Optional[float] = None,
+        sustain: bool = True,
+    ) -> tuple[bool, str]:
+        """Play any SynthDef with custom parameters.
+
+        Args:
+            synthdef: Name of the SynthDef to play (must be loaded in scsynth)
+            params: Dictionary of parameter name -> value pairs
+            dur: Duration in seconds. If None, synth plays until freed manually.
+                 If provided, releases the synth after dur seconds (sets gate=0).
+            sustain: If True, synth sustains until released. If False with dur,
+                     the synth is freed immediately after dur (using n_free).
+
+        Returns:
+            (success, message) tuple
+        """
+        if not self._reply_server:
+            return False, "Not connected to scsynth. Call sc_connect first."
+
+        if not synthdef or not isinstance(synthdef, str):
+            return False, "SynthDef name is required and must be a string"
+
+        if dur is not None and dur <= 0:
+            return False, f"Duration must be positive, got {dur}"
+
+        node_id = self._next_node_id()
+
+        # Build s_new arguments: synthdef name, node_id, add_action, target, then param pairs
+        args: list[Any] = [synthdef, node_id, 0, 0]  # add to head of default group
+
+        if params:
+            for key, value in params.items():
+                # Validate key
+                if not isinstance(key, str):
+                    return False, f"Parameter key must be string, got {type(key).__name__}"
+                # Skip None values
+                if value is None:
+                    continue
+                # Validate and convert value types
+                if isinstance(value, bool):
+                    args.append(key)
+                    args.append(1 if value else 0)
+                elif isinstance(value, (int, float)):
+                    args.append(key)
+                    args.append(float(value))
+                elif isinstance(value, str):
+                    args.append(key)
+                    args.append(value)
+                else:
+                    return False, f"Parameter '{key}' has unsupported type {type(value).__name__} (use bool, int, float, or str)"
+
+        if not self._send_message("/s_new", args):
+            return False, "Failed to send OSC message to scsynth"
+
+        # Schedule release if duration specified
+        if dur is not None:
+            def release_later():
+                time.sleep(dur)
+                if sustain:
+                    # Release envelope (if synth has gate parameter)
+                    self._send_message("/n_set", [node_id, "gate", 0])
+                else:
+                    # Hard free
+                    self._send_message("/n_free", [node_id])
+
+            threading.Thread(target=release_later, daemon=True).start()
+            return True, f"Playing '{synthdef}' for {dur}s (node {node_id})"
+
+        return True, f"Playing '{synthdef}' (node {node_id}) - use sc_free_all to stop"
+
     def free_all(self) -> tuple[bool, str]:
         """Free all synths."""
         if not self._reply_server:
@@ -424,6 +501,118 @@ class SCClient:
             self._reply_server = None
 
 
+MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
+
+
+def find_sclang() -> Optional[str]:
+    """Find the sclang executable path."""
+    # Check if sclang is in PATH
+    sclang_path = shutil.which("sclang")
+    if sclang_path:
+        return sclang_path
+
+    # Platform-specific common locations
+    import platform
+    system = platform.system()
+
+    if system == "Darwin":  # macOS
+        paths = [
+            "/Applications/SuperCollider.app/Contents/MacOS/sclang",
+            "/Applications/SuperCollider/SuperCollider.app/Contents/MacOS/sclang",
+            "~/Applications/SuperCollider.app/Contents/MacOS/sclang",
+        ]
+    elif system == "Linux":
+        paths = [
+            "/usr/bin/sclang",
+            "/usr/local/bin/sclang",
+            "/opt/SuperCollider/bin/sclang",
+        ]
+    elif system == "Windows":
+        paths = [
+            r"C:\Program Files\SuperCollider\sclang.exe",
+            r"C:\Program Files (x86)\SuperCollider\sclang.exe",
+        ]
+    else:
+        paths = []
+
+    for path in paths:
+        expanded = os.path.expanduser(path)
+        if os.path.isfile(expanded):
+            return expanded
+
+    return None
+
+
+# Prefixes to filter from sclang stderr (startup noise)
+SCLANG_STDERR_SKIP_PREFIXES = (
+    'compiling class library',
+    'NumPrimitives',
+    'Welcome to SuperCollider',
+    "type 'help'",
+    'Found',
+    'Compiling',
+    'Read',
+)
+
+
+def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
+    """Execute SuperCollider code via sclang subprocess.
+
+    Args:
+        code: SuperCollider code to execute
+        timeout: Maximum execution time in seconds (default 30, max 300)
+
+    Returns:
+        (success, output) tuple
+    """
+    # Cap timeout to prevent excessive waits
+    timeout = min(timeout, MAX_EVAL_TIMEOUT)
+
+    sclang = find_sclang()
+    if not sclang:
+        return False, "sclang not found. Make sure SuperCollider is installed and sclang is in PATH or at standard location."
+
+    try:
+        # Run sclang with -e flag to execute code and exit
+        result = subprocess.run(
+            [sclang, "-e", code],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        # Combine stdout and stderr
+        output_parts = []
+        if result.stdout.strip():
+            output_parts.append(result.stdout.strip())
+        if result.stderr.strip():
+            # Filter out common sclang startup noise using prefix matching
+            stderr_lines = []
+            for line in result.stderr.strip().split('\n'):
+                stripped = line.strip()
+                # Skip lines that start with known noise prefixes
+                if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
+                    continue
+                stderr_lines.append(line)
+            if stderr_lines:
+                output_parts.append("stderr: " + '\n'.join(stderr_lines))
+
+        output = '\n'.join(output_parts) if output_parts else "(no output)"
+
+        # Non-zero return code indicates error
+        if result.returncode != 0:
+            return False, f"sclang exited with code {result.returncode}\n{output}"
+
+        return True, output
+
+    except subprocess.TimeoutExpired:
+        return False, f"sclang execution timed out after {timeout}s"
+    except FileNotFoundError:
+        return False, f"sclang not found at {sclang}"
+    except Exception as e:
+        return False, f"Error executing sclang: {e}"
+
+
 # Global client instance
 sc_client = SCClient()
 
@@ -533,6 +722,59 @@ def sc_get_analysis() -> str:
     ]
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def sc_play_synth(
+    synthdef: str,
+    params: Optional[dict[str, Any]] = None,
+    dur: Optional[float] = None,
+    sustain: bool = True,
+) -> str:
+    """Play any SynthDef with custom parameters.
+
+    Args:
+        synthdef: Name of the SynthDef to play (must be loaded in scsynth)
+        params: Dictionary of parameter name -> value pairs (e.g., {"freq": 440, "amp": 0.1})
+        dur: Duration in seconds. If not provided, synth plays until freed with sc_free_all.
+        sustain: If True (default), releases envelope after dur. If False, hard-frees the synth.
+
+    Example:
+        sc_play_synth("mySynth", params={"freq": 330, "amp": 0.2}, dur=2.0)
+    """
+    _, message = sc_client.play_synth(
+        synthdef=synthdef,
+        params=params,
+        dur=dur,
+        sustain=sustain,
+    )
+    return message
+
+
+@mcp.tool()
+def sc_eval(code: str, timeout: float = 30.0) -> str:
+    """Execute arbitrary SuperCollider (sclang) code.
+
+    This spawns a new sclang process to execute the code. Useful for:
+    - Defining and loading new SynthDefs
+    - Testing SuperCollider expressions
+    - Running one-off synthesis code
+
+    Args:
+        code: SuperCollider code to execute
+        timeout: Maximum execution time in seconds (default 30)
+
+    Example:
+        sc_eval("SynthDef(\\\\test, { Out.ar(0, SinOsc.ar(440) * 0.1) }).add")
+        sc_eval("{ SinOsc.ar(440) * 0.1 }.play")
+
+    Note: Each call spawns a fresh sclang process, so state doesn't persist between calls.
+    For persistent synths, define SynthDefs and use sc_play_synth to trigger them.
+    """
+    success, output = eval_sclang(code, timeout=timeout)
+    if success:
+        return f"Executed successfully:\n{output}"
+    return f"Error:\n{output}"
 
 
 def _cleanup():
