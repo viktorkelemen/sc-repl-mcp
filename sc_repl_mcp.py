@@ -737,6 +737,7 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     code_with_exit = code_stripped + "\n0.exit;\n"
 
     temp_path = None
+    temp_home = None
     proc = None
     try:
         # Create a temporary .scd file
@@ -748,12 +749,22 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
             f.write(code_with_exit)
             temp_path = f.name
 
-        # Run sclang with explicit timeout handling to ensure process is killed on timeout
+        # Create a fake HOME directory to prevent sclang from loading user's startup.scd
+        # This avoids issues where startup files (e.g., SuperDirt) reboot the server
+        temp_home = tempfile.mkdtemp(prefix='sclang_mcp_')
+        sc_support_dir = os.path.join(temp_home, 'Library', 'Application Support', 'SuperCollider')
+        os.makedirs(sc_support_dir, exist_ok=True)
+
+        # Run sclang with fake HOME to skip user startup files
+        env = os.environ.copy()
+        env['HOME'] = temp_home
+
         proc = subprocess.Popen(
             [sclang, temp_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
         )
 
         try:
@@ -793,10 +804,15 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Error executing sclang: {e}"
     finally:
-        # Always clean up temp file
+        # Always clean up temp file and temp home
         if temp_path:
             try:
                 os.unlink(temp_path)
+            except OSError:
+                pass
+        if temp_home:
+            try:
+                shutil.rmtree(temp_home)
             except OSError:
                 pass
 
