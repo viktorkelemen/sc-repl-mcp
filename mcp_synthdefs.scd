@@ -58,5 +58,19 @@ SynthDef(\mcp_meter, {
     );
 }).add;
 
+// OSC Forwarding to MCP server
+// SendReply only sends to sclang (port 57120), but the MCP server
+// listens on port 57130. These OSCFuncs bridge the gap.
+~mcpAddr = NetAddr("127.0.0.1", 57130);
+
+~mcpAnalysisForwarder = OSCFunc({ |msg|
+	~mcpAddr.sendMsg(*msg);
+}, '/mcp/analysis');
+
+~mcpMeterForwarder = OSCFunc({ |msg|
+	~mcpAddr.sendMsg(*msg);
+}, '/mcp/meter');
+
 "MCP SynthDefs loaded: \\mcp_analyzer, \\mcp_meter".postln;
+"MCP OSC forwarding enabled (port 57130)".postln;
 )
