@@ -1083,24 +1083,76 @@ def sc_play_synth(
 
 
 @mcp.tool()
+def sc_load_synthdef(name: str, code: str, timeout: float = 15.0) -> str:
+    """Load a SynthDef reliably by writing to disk and loading via OSC.
+
+    This is the recommended way to define SynthDefs because it avoids async race
+    conditions that occur with .add (which may not complete before sclang exits).
+
+    Args:
+        name: Name of the SynthDef (e.g., "metallic")
+        code: The SynthDef body - everything inside the { } including args and Out.ar
+        timeout: Maximum execution time in seconds (default 15)
+
+    Example:
+        sc_load_synthdef("ping", '''
+            arg freq = 440, amp = 0.1, dur = 0.5;
+            var sig = SinOsc.ar(freq) * EnvGen.kr(Env.perc(0.01, dur), doneAction: 2);
+            Out.ar(0, sig ! 2 * amp);
+        ''')
+
+    After loading, play it with:
+        sc_play_synth("ping", params={"freq": 880, "amp": 0.2})
+    """
+    # Wrap the code in a SynthDef that writes to disk and loads via OSC
+    full_code = f"""
+SynthDef(\\{name}, {{
+{code}
+}}).writeDefFile;
+s.sendMsg(\\d_load, SynthDef.synthDefDir ++ "{name}.scsyndef");
+"SynthDef '{name}' loaded".postln;
+"""
+    success, output = eval_sclang(full_code, timeout=timeout)
+    if success:
+        return f"SynthDef '{name}' loaded successfully"
+    return f"Error loading SynthDef '{name}':\n{output}"
+
+
+@mcp.tool()
 def sc_eval(code: str, timeout: float = 30.0) -> str:
     """Execute arbitrary SuperCollider (sclang) code.
 
     This spawns a new sclang process to execute the code. Useful for:
-    - Defining and loading new SynthDefs
+    - Playing sequences with s.sendBundle()
     - Testing SuperCollider expressions
-    - Running one-off synthesis code
+    - One-off synthesis with { }.play
 
     Args:
         code: SuperCollider code to execute
         timeout: Maximum execution time in seconds (default 30)
 
-    Example:
-        sc_eval("SynthDef(\\\\test, { Out.ar(0, SinOsc.ar(440) * 0.1) }).add")
-        sc_eval("{ SinOsc.ar(440) * 0.1 }.play")
+    IMPORTANT - Common pitfalls to avoid:
 
-    Note: Each call spawns a fresh sclang process, so state doesn't persist between calls.
-    For persistent synths, define SynthDefs and use sc_play_synth to trigger them.
+    1. For SynthDefs, use sc_load_synthdef instead of sc_eval with .add
+       (async .add races with process exit)
+
+    2. Put ALL var declarations at the START before any expressions:
+       WRONG:  s.sendBundle(...); var x = 1;
+       RIGHT:  var x = 1; s.sendBundle(...);
+
+    3. Use hardcoded times for sendBundle, not incrementing variables:
+       WRONG:  var t = 0; s.sendBundle(t, ...); t = t + 0.1;
+       RIGHT:  s.sendBundle(0.0, ...); s.sendBundle(0.1, ...);
+
+    4. Avoid .wait, fork with blocking, or Condition.hang (will timeout)
+
+    Example - playing a sequence:
+        s.sendBundle(0.0, [\\s_new, \\default, -1, 0, 0, \\freq, 440]);
+        s.sendBundle(0.2, [\\s_new, \\default, -1, 0, 0, \\freq, 550]);
+        s.sendBundle(0.4, [\\s_new, \\default, -1, 0, 0, \\freq, 660]);
+        "Scheduled 3 notes".postln;
+
+    Note: Each call spawns a fresh sclang process, so state doesn't persist.
     """
     success, output = eval_sclang(code, timeout=timeout)
     if success:

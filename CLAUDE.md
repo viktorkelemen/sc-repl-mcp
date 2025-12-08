@@ -1,0 +1,128 @@
+# SC-REPL MCP Server - Claude Usage Guide
+
+This MCP server enables Claude to control SuperCollider for sound synthesis and music creation.
+
+## Quick Start
+
+1. **Connect**: `sc_connect` - connects to scsynth and starts sclang for SynthDef loading
+2. **Play**: `sc_play_sine` or `sc_play_synth` to make sounds
+3. **Analyze**: `sc_start_analyzer` then `sc_get_analysis` to monitor audio
+4. **Debug**: `sc_get_logs` to see server messages and errors
+
+## Tool Reference
+
+### Basic Tools
+- `sc_connect` - Connect to SuperCollider (required first step)
+- `sc_status` - Check server status, CPU, synth count
+- `sc_play_sine(freq, amp, dur)` - Quick test tone
+- `sc_free_all` - Stop all sounds
+
+### SynthDef Tools
+- `sc_load_synthdef(name, code)` - **Recommended** way to define SynthDefs
+- `sc_play_synth(synthdef, params, dur)` - Play any loaded SynthDef
+
+### Advanced Tools
+- `sc_eval(code)` - Execute arbitrary SuperCollider code
+- `sc_start_analyzer` / `sc_stop_analyzer` - Audio monitoring
+- `sc_get_analysis` - Get pitch, timbre, amplitude data
+- `sc_get_logs` / `sc_clear_logs` - Server log access
+
+## Defining SynthDefs
+
+**Always use `sc_load_synthdef`** instead of `sc_eval` with `.add`:
+
+```python
+sc_load_synthdef("ping", '''
+    arg freq = 440, amp = 0.1, dur = 0.5;
+    var sig = SinOsc.ar(freq) * EnvGen.kr(Env.perc(0.01, dur), doneAction: 2);
+    Out.ar(0, sig ! 2 * amp);
+''')
+```
+
+Then play it:
+```python
+sc_play_synth("ping", params={"freq": 880, "amp": 0.2})
+```
+
+## Playing Sequences with sc_eval
+
+Use `s.sendBundle` with hardcoded timestamps for timed note sequences:
+
+```supercollider
+// Schedule notes at specific times (relative to now)
+s.sendBundle(0.0, [\s_new, \ping, -1, 0, 0, \freq, 440, \amp, 0.2]);
+s.sendBundle(0.2, [\s_new, \ping, -1, 0, 0, \freq, 550, \amp, 0.2]);
+s.sendBundle(0.4, [\s_new, \ping, -1, 0, 0, \freq, 660, \amp, 0.2]);
+"Sequence scheduled".postln;
+```
+
+## Common Pitfalls to Avoid
+
+### 1. Don't use .add for SynthDefs
+```supercollider
+// WRONG - races with process exit
+SynthDef(\foo, { ... }).add;
+
+// RIGHT - use sc_load_synthdef tool instead
+```
+
+### 2. var declarations must come first
+```supercollider
+// WRONG - will timeout
+s.sendBundle(0.1, ...);
+var x = 1;
+
+// RIGHT
+var x = 1;
+s.sendBundle(0.1, ...);
+```
+
+### 3. Don't use incrementing variables with sendBundle
+```supercollider
+// WRONG - var assignment issues cause timeout
+var t = 0;
+s.sendBundle(t, ...); t = t + 0.1;
+s.sendBundle(t, ...); t = t + 0.1;
+
+// RIGHT - hardcode the times
+s.sendBundle(0.0, ...);
+s.sendBundle(0.1, ...);
+s.sendBundle(0.2, ...);
+```
+
+### 4. Avoid blocking constructs
+```supercollider
+// WRONG - will timeout
+0.5.wait;
+fork { ... s.sync; ... };
+Condition.new.hang;
+```
+
+## Metallic/Inharmonic Sounds
+
+For metallic sounds, use inharmonic partials with Klank:
+
+```python
+sc_load_synthdef("metallic", '''
+    arg freq = 440, amp = 0.2, decay = 2, spread = 1;
+    var freqs = [1, 2.32, 3.17, 4.53, 5.87] * freq * spread;
+    var amps = [1, 0.6, 0.4, 0.25, 0.2];
+    var decays = [1, 0.8, 0.7, 0.6, 0.5] * decay;
+    var exciter = Impulse.ar(0) + (WhiteNoise.ar(0.5) * EnvGen.ar(Env.perc(0.001, 0.01)));
+    var sig = Klank.ar(`[freqs, amps, decays], exciter);
+    sig = sig * EnvGen.kr(Env.perc(0.001, decay), doneAction: 2) * amp;
+    Out.ar(0, sig ! 2);
+''')
+```
+
+## Debugging
+
+Check logs when things don't work:
+```python
+sc_get_logs()  # See recent server messages
+sc_get_logs(category="fail")  # See only errors
+```
+
+Common errors:
+- "SynthDef not found" - SynthDef wasn't loaded, use `sc_load_synthdef`
+- Timeout - Check for var placement issues or blocking constructs
