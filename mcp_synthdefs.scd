@@ -64,7 +64,12 @@ SynthDef(\mcp_meter, {
 ~mcpAddr = NetAddr("127.0.0.1", 57130);
 
 ~mcpAnalysisForwarder = OSCFunc({ |msg|
+	var peakL = msg[8];
 	~mcpAddr.sendMsg(*msg);
+	// Only log when there's audio
+	if (peakL > 0.001) {
+		"Audio: % Hz, peak: %".format(msg[3].round(0.1), peakL.round(0.001)).postln;
+	};
 }, '/mcp/analysis');
 
 ~mcpMeterForwarder = OSCFunc({ |msg|

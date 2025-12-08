@@ -29,15 +29,53 @@ class ReuseAddrOSCUDPServer(osc_server.ThreadingOSCUDPServer):
 
 SCSYNTH_HOST = "127.0.0.1"
 SCSYNTH_PORT = 57110
-REPLY_PORT = 57130  # Avoid 57120 (sclang's default)
+REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed on connect)
+
+
+def _kill_process_on_port(port: int) -> bool:
+    """Kill any process using the specified UDP port. Returns True if a process was killed."""
+    try:
+        # Use lsof to find process using the port (works on macOS and Linux)
+        result = subprocess.run(
+            ["lsof", "-t", "-i", f"UDP:{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            my_pid = os.getpid()
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str)
+                    if pid != my_pid:  # Don't kill ourselves
+                        os.kill(pid, signal.SIGTERM)
+                        # Give it a moment to die gracefully
+                        time.sleep(0.1)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+            return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return False
+
 
 # SuperCollider code to load SynthDefs and set up OSC forwarding
 # This runs in a persistent sclang process started by the MCP server
 SCLANG_INIT_CODE = r'''
-// MCP Audio Analyzer SynthDefs
+// Connect to the existing scsynth server (running in SuperCollider.app)
+// This ensures SynthDefs are added to the correct server
+Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", 57110));
+s = Server.default;
+// Server.remote handles connection automatically
 
-// Full audio analyzer - pitch, timbre, amplitude
-SynthDef(\mcp_analyzer, {
+fork {
+    0.5.wait;  // Give server connection time to establish
+
+    // MCP Audio Analyzer SynthDefs
+
+    // Full audio analyzer - pitch, timbre, amplitude
+    SynthDef(\mcp_analyzer, {
     arg bus = 0, replyRate = 10, replyID = 1001;
     var in, mono, fft;
     var freq, hasFreq, centroid, flatness, rolloff;
@@ -84,16 +122,34 @@ SynthDef(\mcp_meter, {
     );
 }).add;
 
-// OSC Forwarding to MCP server (port 57130)
+    "MCP SynthDefs loaded".postln;
+};  // end fork
+
+// OSC Forwarding to MCP server (port 57130) - outside fork, doesn't need server
 ~mcpAddr = NetAddr("127.0.0.1", 57130);
-~mcpAnalysisForwarder = OSCFunc({ |msg| ~mcpAddr.sendMsg(*msg) }, '/mcp/analysis');
+~mcpAnalysisForwarder = OSCFunc({ |msg|
+    var peakL = msg[8];  // Index 8: [addr, node, reply, freq, hasFreq, centroid, flatness, rolloff, peakL, ...]
+    ~mcpAddr.sendMsg(*msg);
+    // Only log when there's audio (peak > 0.001)
+    if (peakL > 0.001) {
+        "Audio: % Hz, peak: %".format(msg[3].round(0.1), peakL.round(0.001)).postln;
+    };
+}, '/mcp/analysis');
 ~mcpMeterForwarder = OSCFunc({ |msg| ~mcpAddr.sendMsg(*msg) }, '/mcp/meter');
 
-"MCP SynthDefs loaded and OSC forwarding active".postln;
+"OSC forwarding active".postln;
 
 // Keep sclang running indefinitely
 { inf.wait }.defer;
 '''
+
+
+@dataclass
+class LogEntry:
+    """A log entry from the SuperCollider server."""
+    timestamp: float
+    category: str  # 'fail', 'done', 'node', 'osc', 'info'
+    message: str
 
 
 @dataclass
@@ -179,6 +235,10 @@ class SCClient:
         self._sclang_process: Optional[subprocess.Popen] = None
         self._sclang_init_file: Optional[str] = None  # Temp file for init code
 
+        # Server log capture
+        self._log_buffer: deque[LogEntry] = deque(maxlen=500)
+        self._log_lock = threading.Lock()
+
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
 
@@ -195,6 +255,12 @@ class SCClient:
             return True
         except Exception:
             return False
+
+    def _add_log(self, category: str, message: str):
+        """Add an entry to the log buffer (thread-safe)."""
+        entry = LogEntry(timestamp=time.time(), category=category, message=message)
+        with self._log_lock:
+            self._log_buffer.append(entry)
 
     def _handle_status_reply(self, address: str, *args):
         """Handle /status.reply from scsynth."""
@@ -213,11 +279,28 @@ class SCClient:
 
     def _handle_done(self, address: str, *args):
         """Handle /done messages."""
-        pass
+        if args:
+            self._add_log("done", f"{args[0]} completed" + (f" {args[1:]}" if len(args) > 1 else ""))
 
     def _handle_fail(self, address: str, *args):
         """Handle /fail messages."""
-        sys.stderr.write(f"[SC] Fail: {args}\n")
+        msg = f"FAIL: {' '.join(str(a) for a in args)}"
+        self._add_log("fail", msg)
+        sys.stderr.write(f"[SC] {msg}\n")
+
+    def _handle_node_go(self, address: str, *args):
+        """Handle /n_go messages (node started)."""
+        if len(args) >= 4:
+            node_id, parent, prev, next_node = args[:4]
+            is_group = args[4] if len(args) > 4 else -1
+            node_type = "group" if is_group == 1 else "synth"
+            self._add_log("node", f"Node {node_id} ({node_type}) started in group {parent}")
+
+    def _handle_node_info(self, address: str, *args):
+        """Handle /n_info messages (node info reply)."""
+        if len(args) >= 4:
+            node_id, parent, prev, next_node = args[:4]
+            self._add_log("node", f"Node {node_id}: parent={parent}, prev={prev}, next={next_node}")
 
     def _handle_analysis(self, address: str, *args):
         """Handle /mcp/analysis messages from the analyzer synth.
@@ -270,6 +353,7 @@ class SCClient:
         """
         if len(args) >= 1:
             node_id = int(args[0])
+            self._add_log("node", f"Node {node_id} ended")
             if node_id == self._analyzer_node_id:
                 self._analyzer_node_id = None
 
@@ -352,9 +436,19 @@ class SCClient:
 
     def connect(self) -> tuple[bool, str]:
         """Connect to scsynth server and start sclang for SynthDefs."""
-        # Clean up existing connection first
+        # Check if already connected and working - reuse the connection
         if self._reply_server:
-            self._reply_server.shutdown()
+            try:
+                status = self.get_status()
+                if status.running:
+                    return True, f"Already connected to scsynth on port {SCSYNTH_PORT}"
+            except Exception:
+                pass
+            # Connection exists but not working - clean it up
+            try:
+                self._reply_server.shutdown()
+            except Exception:
+                pass
             self._reply_server = None
 
         try:
@@ -363,13 +457,26 @@ class SCClient:
             disp.map("/status.reply", self._handle_status_reply)
             disp.map("/done", self._handle_done)
             disp.map("/fail", self._handle_fail)
+            disp.map("/n_go", self._handle_node_go)
             disp.map("/n_end", self._handle_node_end)
+            disp.map("/n_info", self._handle_node_info)
             disp.map("/mcp/analysis", self._handle_analysis)
             disp.map("/mcp/meter", self._handle_meter)
 
-            self._reply_server = ReuseAddrOSCUDPServer(
-                (SCSYNTH_HOST, REPLY_PORT), disp
-            )
+            # Try to bind, killing orphaned processes if needed
+            for attempt in range(2):
+                try:
+                    self._reply_server = ReuseAddrOSCUDPServer(
+                        (SCSYNTH_HOST, REPLY_PORT), disp
+                    )
+                    break  # Success
+                except OSError as e:
+                    if e.errno == 48 and attempt == 0:  # Address already in use
+                        _kill_process_on_port(REPLY_PORT)
+                        time.sleep(0.2)  # Give OS time to release the port
+                    else:
+                        raise
+
             thread = threading.Thread(target=self._reply_server.serve_forever, daemon=True)
             thread.start()
 
@@ -377,6 +484,10 @@ class SCClient:
             status = self.get_status()
             if not status.running:
                 return False, "scsynth not responding. Make sure SuperCollider server is running."
+
+            # Enable notifications for node events (/n_go, /n_end, etc.)
+            self._send_message("/notify", [1])
+            self._add_log("info", f"Connected to scsynth on port {SCSYNTH_PORT}")
 
             # Start sclang for SynthDefs and OSC forwarding
             sclang_ok, sclang_msg = self._start_sclang()
@@ -653,6 +764,29 @@ class SCClient:
             self._reply_server.shutdown()
             self._reply_server = None
 
+    def get_logs(self, limit: int = 50, category: Optional[str] = None) -> list[LogEntry]:
+        """Get recent log entries.
+
+        Args:
+            limit: Maximum number of entries to return (default 50)
+            category: Filter by category ('fail', 'done', 'node', 'info') or None for all
+
+        Returns:
+            List of LogEntry objects, most recent last
+        """
+        with self._log_lock:
+            entries = list(self._log_buffer)
+
+        if category:
+            entries = [e for e in entries if e.category == category]
+
+        return entries[-limit:]
+
+    def clear_logs(self):
+        """Clear the log buffer."""
+        with self._log_lock:
+            self._log_buffer.clear()
+
 
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
 
@@ -730,11 +864,21 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
         return False, "sclang not found. Make sure SuperCollider is installed and sclang is in PATH or at standard location."
 
     # sclang doesn't support -e flag, so we write code to a temp file
-    # Ensure code ends with semicolon, then append 0.exit to exit after execution
+    # Prepend server connection code so SynthDefs are added to the correct server
+    # Use fork with s.sync to ensure server is ready, then delay before exit
+    server_connect = """
+// Connect to the existing scsynth server (running in SuperCollider.app)
+Server.default = Server.remote(\\scsynth, NetAddr("127.0.0.1", 57110));
+s = Server.default;
+"""
+    code_footer = """
+0.exit;
+"""
+    # Ensure code ends with semicolon
     code_stripped = code.rstrip()
     if not code_stripped.endswith(';'):
         code_stripped += ';'
-    code_with_exit = code_stripped + "\n0.exit;\n"
+    code_with_exit = server_connect + code_stripped + code_footer
 
     temp_path = None
     proc = None
@@ -962,6 +1106,45 @@ def sc_eval(code: str, timeout: float = 30.0) -> str:
     if success:
         return f"Executed successfully:\n{output}"
     return f"Error:\n{output}"
+
+
+@mcp.tool()
+def sc_get_logs(limit: int = 50, category: Optional[str] = None) -> str:
+    """Get recent server log messages.
+
+    Captures OSC messages from scsynth including:
+    - /fail messages (errors)
+    - /done messages (completed operations)
+    - /n_go, /n_end messages (node lifecycle)
+
+    Args:
+        limit: Maximum number of entries to return (default 50, max 500)
+        category: Filter by category: 'fail', 'done', 'node', or None for all
+
+    Note: Logs are captured from OSC communication with scsynth.
+    This does not include the SuperCollider IDE's Post Window output.
+    """
+    from datetime import datetime
+
+    limit = min(limit, 500)
+    entries = sc_client.get_logs(limit=limit, category=category)
+
+    if not entries:
+        return "No log entries" + (f" in category '{category}'" if category else "")
+
+    lines = []
+    for entry in entries:
+        ts = datetime.fromtimestamp(entry.timestamp).strftime("%H:%M:%S.%f")[:-3]
+        lines.append(f"[{ts}] [{entry.category.upper()}] {entry.message}")
+
+    return f"Log entries ({len(entries)}):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+def sc_clear_logs() -> str:
+    """Clear the server log buffer."""
+    sc_client.clear_logs()
+    return "Log buffer cleared"
 
 
 def _cleanup():
