@@ -305,8 +305,12 @@ class SCClient:
 
             # Check if process is still running
             if self._sclang_process.poll() is not None:
-                # Process exited unexpectedly
+                # Process exited unexpectedly - ensure fully reaped
                 exit_code = self._sclang_process.returncode
+                try:
+                    self._sclang_process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
                 self._sclang_process = None
                 self._cleanup_sclang_init_file()
                 return False, f"sclang exited unexpectedly with code {exit_code}"
@@ -329,19 +333,21 @@ class SCClient:
 
     def _stop_sclang(self):
         """Stop the persistent sclang process."""
-        if self._sclang_process:
+        # Capture reference locally to avoid race conditions
+        proc = self._sclang_process
+        self._sclang_process = None  # Clear reference immediately
+        if proc:
             try:
-                self._sclang_process.terminate()
-                self._sclang_process.wait(timeout=2.0)
+                proc.terminate()
+                proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                self._sclang_process.kill()
+                proc.kill()
                 try:
-                    self._sclang_process.wait(timeout=1.0)  # Reap the killed process
+                    proc.wait(timeout=1.0)  # Reap the killed process
                 except subprocess.TimeoutExpired:
                     pass  # Process truly stuck, nothing more we can do
             except Exception:
                 pass
-            self._sclang_process = None
         self._cleanup_sclang_init_file()
 
     def connect(self) -> tuple[bool, str]:
@@ -731,6 +737,7 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     code_with_exit = code_stripped + "\n0.exit;\n"
 
     temp_path = None
+    proc = None
     try:
         # Create a temporary .scd file
         with tempfile.NamedTemporaryFile(
@@ -741,22 +748,30 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
             f.write(code_with_exit)
             temp_path = f.name
 
-        # Run sclang with the temp file
-        result = subprocess.run(
+        # Run sclang with explicit timeout handling to ensure process is killed on timeout
+        proc = subprocess.Popen(
             [sclang, temp_path],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill the process and reap it
+            proc.kill()
+            proc.wait()
+            return False, f"sclang execution timed out after {timeout}s"
 
         # Combine stdout and stderr
         output_parts = []
-        if result.stdout.strip():
-            output_parts.append(result.stdout.strip())
-        if result.stderr.strip():
+        if stdout and stdout.strip():
+            output_parts.append(stdout.strip())
+        if stderr and stderr.strip():
             # Filter out common sclang startup noise using prefix matching
             stderr_lines = []
-            for line in result.stderr.strip().split('\n'):
+            for line in stderr.strip().split('\n'):
                 stripped = line.strip()
                 # Skip lines that start with known noise prefixes
                 if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
@@ -768,13 +783,11 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
         output = '\n'.join(output_parts) if output_parts else "(no output)"
 
         # Non-zero return code indicates error (but 0.exit returns 0)
-        if result.returncode != 0:
-            return False, f"sclang exited with code {result.returncode}\n{output}"
+        if proc.returncode != 0:
+            return False, f"sclang exited with code {proc.returncode}\n{output}"
 
         return True, output
 
-    except subprocess.TimeoutExpired:
-        return False, f"sclang execution timed out after {timeout}s"
     except FileNotFoundError:
         return False, f"sclang not found at {sclang}"
     except Exception as e:
