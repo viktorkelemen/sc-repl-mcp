@@ -70,7 +70,4 @@ SynthDef(\mcp_meter, {
 ~mcpMeterForwarder = OSCFunc({ |msg|
 	~mcpAddr.sendMsg(*msg);
 }, '/mcp/meter');
-
-"MCP SynthDefs loaded: \\mcp_analyzer, \\mcp_meter".postln;
-"MCP OSC forwarding enabled (port 57130)".postln;
 )
