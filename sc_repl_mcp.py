@@ -30,6 +30,70 @@ SCSYNTH_HOST = "127.0.0.1"
 SCSYNTH_PORT = 57110
 REPLY_PORT = 57130  # Avoid 57120 (sclang's default)
 
+# SuperCollider code to load SynthDefs and set up OSC forwarding
+# This runs in a persistent sclang process started by the MCP server
+SCLANG_INIT_CODE = r'''
+// MCP Audio Analyzer SynthDefs
+
+// Full audio analyzer - pitch, timbre, amplitude
+SynthDef(\mcp_analyzer, {
+    arg bus = 0, replyRate = 10, replyID = 1001;
+    var in, mono, fft;
+    var freq, hasFreq, centroid, flatness, rolloff;
+    var peakL, peakR, rmsL, rmsR;
+
+    in = In.ar(bus, 2);
+    mono = in.sum * 0.5;
+    fft = FFT(LocalBuf(2048), mono);
+
+    # freq, hasFreq = Pitch.kr(mono, ampThreshold: 0.01, median: 7);
+    centroid = SpecCentroid.kr(fft);
+    flatness = SpecFlatness.kr(fft);
+    rolloff = SpecPcile.kr(fft, 0.9);
+
+    peakL = PeakFollower.kr(in[0], 0.99);
+    peakR = PeakFollower.kr(in[1], 0.99);
+    rmsL = RunningSum.rms(in[0], 1024);
+    rmsR = RunningSum.rms(in[1], 1024);
+
+    SendReply.kr(
+        Impulse.kr(replyRate),
+        '/mcp/analysis',
+        [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR],
+        replyID
+    );
+}).add;
+
+// Simple peak/RMS meter only (lighter weight)
+SynthDef(\mcp_meter, {
+    arg bus = 0, replyRate = 20, replyID = 1002;
+    var in, peakL, peakR, rmsL, rmsR;
+
+    in = In.ar(bus, 2);
+    peakL = PeakFollower.kr(in[0], 0.99);
+    peakR = PeakFollower.kr(in[1], 0.99);
+    rmsL = RunningSum.rms(in[0], 512);
+    rmsR = RunningSum.rms(in[1], 512);
+
+    SendReply.kr(
+        Impulse.kr(replyRate),
+        '/mcp/meter',
+        [peakL, peakR, rmsL, rmsR],
+        replyID
+    );
+}).add;
+
+// OSC Forwarding to MCP server (port 57130)
+~mcpAddr = NetAddr("127.0.0.1", 57130);
+~mcpAnalysisForwarder = OSCFunc({ |msg| ~mcpAddr.sendMsg(*msg) }, '/mcp/analysis');
+~mcpMeterForwarder = OSCFunc({ |msg| ~mcpAddr.sendMsg(*msg) }, '/mcp/meter');
+
+"MCP SynthDefs loaded and OSC forwarding active".postln;
+
+// Keep sclang running indefinitely
+{ inf.wait }.defer;
+'''
+
 
 @dataclass
 class ServerStatus:
@@ -109,6 +173,9 @@ class SCClient:
         self._analysis_data: Optional[AnalysisData] = None
         self._analysis_history: deque[AnalysisData] = deque(maxlen=100)
         self._analysis_lock = threading.Lock()
+
+        # Persistent sclang process for SynthDefs and OSC forwarding
+        self._sclang_process: Optional[subprocess.Popen] = None
 
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
@@ -204,8 +271,54 @@ class SCClient:
             if node_id == self._analyzer_node_id:
                 self._analyzer_node_id = None
 
+    def _start_sclang(self) -> tuple[bool, str]:
+        """Start persistent sclang process for SynthDefs and OSC forwarding."""
+        # Stop any existing sclang process
+        self._stop_sclang()
+
+        sclang = find_sclang()
+        if not sclang:
+            return False, "sclang not found"
+
+        try:
+            # Start sclang with the init code
+            self._sclang_process = subprocess.Popen(
+                [sclang, "-e", SCLANG_INIT_CODE],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            # Give sclang time to compile and load SynthDefs
+            time.sleep(2.0)
+
+            # Check if process is still running
+            if self._sclang_process.poll() is not None:
+                # Process exited, get error output
+                _, stderr = self._sclang_process.communicate()
+                self._sclang_process = None
+                return False, f"sclang exited unexpectedly: {stderr[:500]}"
+
+            return True, "sclang started with SynthDefs and OSC forwarding"
+
+        except Exception as e:
+            self._sclang_process = None
+            return False, f"Failed to start sclang: {e}"
+
+    def _stop_sclang(self):
+        """Stop the persistent sclang process."""
+        if self._sclang_process:
+            try:
+                self._sclang_process.terminate()
+                self._sclang_process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._sclang_process.kill()
+            except Exception:
+                pass
+            self._sclang_process = None
+
     def connect(self) -> tuple[bool, str]:
-        """Connect to scsynth server."""
+        """Connect to scsynth server and start sclang for SynthDefs."""
         # Clean up existing connection first
         if self._reply_server:
             self._reply_server.shutdown()
@@ -229,10 +342,16 @@ class SCClient:
 
             # Query status to verify connection (uses the same socket for send/receive)
             status = self.get_status()
-            if status.running:
-                return True, f"Connected to scsynth on port {SCSYNTH_PORT}"
-            else:
+            if not status.running:
                 return False, "scsynth not responding. Make sure SuperCollider server is running."
+
+            # Start sclang for SynthDefs and OSC forwarding
+            sclang_ok, sclang_msg = self._start_sclang()
+            if sclang_ok:
+                return True, f"Connected to scsynth on port {SCSYNTH_PORT}. {sclang_msg}"
+            else:
+                # Connection succeeded but sclang failed - still usable, just warn
+                return True, f"Connected to scsynth on port {SCSYNTH_PORT}. Warning: {sclang_msg} (analyzer may not work)"
 
         except Exception as e:
             return False, f"Failed to connect: {e}"
@@ -495,7 +614,8 @@ class SCClient:
         return True, "Analysis data retrieved", result
 
     def disconnect(self):
-        """Disconnect from server."""
+        """Disconnect from server and stop sclang."""
+        self._stop_sclang()
         if self._reply_server:
             self._reply_server.shutdown()
             self._reply_server = None
