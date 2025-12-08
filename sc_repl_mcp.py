@@ -293,11 +293,11 @@ class SCClient:
                 self._sclang_init_file = f.name
 
             # Start sclang with the init file
+            # Use DEVNULL to avoid pipe buffer deadlock (sclang output can exceed 64KB)
             self._sclang_process = subprocess.Popen(
                 [sclang, self._sclang_init_file],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
 
             # Give sclang time to compile and load SynthDefs
@@ -305,11 +305,11 @@ class SCClient:
 
             # Check if process is still running
             if self._sclang_process.poll() is not None:
-                # Process exited, get error output
-                _, stderr = self._sclang_process.communicate()
+                # Process exited unexpectedly
+                exit_code = self._sclang_process.returncode
                 self._sclang_process = None
                 self._cleanup_sclang_init_file()
-                return False, f"sclang exited unexpectedly: {stderr[:500]}"
+                return False, f"sclang exited unexpectedly with code {exit_code}"
 
             return True, "sclang started with SynthDefs and OSC forwarding"
 
@@ -335,6 +335,10 @@ class SCClient:
                 self._sclang_process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 self._sclang_process.kill()
+                try:
+                    self._sclang_process.wait(timeout=1.0)  # Reap the killed process
+                except subprocess.TimeoutExpired:
+                    pass  # Process truly stuck, nothing more we can do
             except Exception:
                 pass
             self._sclang_process = None
@@ -708,6 +712,10 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     Returns:
         (success, output) tuple
     """
+    # Validate input
+    if not code or not code.strip():
+        return False, "No code provided"
+
     # Cap timeout to prevent excessive waits
     timeout = min(timeout, MAX_EVAL_TIMEOUT)
 
@@ -722,6 +730,7 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
         code_stripped += ';'
     code_with_exit = code_stripped + "\n0.exit;\n"
 
+    temp_path = None
     try:
         # Create a temporary .scd file
         with tempfile.NamedTemporaryFile(
@@ -732,45 +741,37 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
             f.write(code_with_exit)
             temp_path = f.name
 
-        try:
-            # Run sclang with the temp file
-            result = subprocess.run(
-                [sclang, temp_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+        # Run sclang with the temp file
+        result = subprocess.run(
+            [sclang, temp_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
 
-            # Combine stdout and stderr
-            output_parts = []
-            if result.stdout.strip():
-                output_parts.append(result.stdout.strip())
-            if result.stderr.strip():
-                # Filter out common sclang startup noise using prefix matching
-                stderr_lines = []
-                for line in result.stderr.strip().split('\n'):
-                    stripped = line.strip()
-                    # Skip lines that start with known noise prefixes
-                    if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
-                        continue
-                    stderr_lines.append(line)
-                if stderr_lines:
-                    output_parts.append("stderr: " + '\n'.join(stderr_lines))
+        # Combine stdout and stderr
+        output_parts = []
+        if result.stdout.strip():
+            output_parts.append(result.stdout.strip())
+        if result.stderr.strip():
+            # Filter out common sclang startup noise using prefix matching
+            stderr_lines = []
+            for line in result.stderr.strip().split('\n'):
+                stripped = line.strip()
+                # Skip lines that start with known noise prefixes
+                if stripped.startswith(SCLANG_STDERR_SKIP_PREFIXES):
+                    continue
+                stderr_lines.append(line)
+            if stderr_lines:
+                output_parts.append("stderr: " + '\n'.join(stderr_lines))
 
-            output = '\n'.join(output_parts) if output_parts else "(no output)"
+        output = '\n'.join(output_parts) if output_parts else "(no output)"
 
-            # Non-zero return code indicates error (but 0.exit returns 0)
-            if result.returncode != 0:
-                return False, f"sclang exited with code {result.returncode}\n{output}"
+        # Non-zero return code indicates error (but 0.exit returns 0)
+        if result.returncode != 0:
+            return False, f"sclang exited with code {result.returncode}\n{output}"
 
-            return True, output
-
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+        return True, output
 
     except subprocess.TimeoutExpired:
         return False, f"sclang execution timed out after {timeout}s"
@@ -778,6 +779,13 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
         return False, f"sclang not found at {sclang}"
     except Exception as e:
         return False, f"Error executing sclang: {e}"
+    finally:
+        # Always clean up temp file
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 # Global client instance
