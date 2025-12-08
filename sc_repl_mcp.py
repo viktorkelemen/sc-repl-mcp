@@ -5,12 +5,22 @@ Uses OSC to communicate directly with scsynth.
 """
 
 import atexit
+import math
+import signal
 import sys
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from pythonosc import osc_server, dispatcher, osc_message_builder
+
+
+class ReuseAddrOSCUDPServer(osc_server.ThreadingOSCUDPServer):
+    """OSC server that allows address reuse for faster reconnection."""
+    allow_reuse_address = True
 
 
 SCSYNTH_HOST = "127.0.0.1"
@@ -30,6 +40,54 @@ class ServerStatus:
     sample_rate: float = 0.0
 
 
+@dataclass
+class AnalysisData:
+    """Audio analysis data from the mcp_analyzer SynthDef."""
+    timestamp: float = 0.0
+    # Pitch
+    freq: float = 0.0
+    has_freq: float = 0.0  # confidence 0-1
+    # Timbre
+    centroid: float = 0.0  # spectral centroid in Hz
+    flatness: float = 0.0  # 0 = tonal, 1 = noise
+    rolloff: float = 0.0   # 90% energy rolloff frequency
+    # Amplitude
+    peak_l: float = 0.0
+    peak_r: float = 0.0
+    rms_l: float = 0.0
+    rms_r: float = 0.0
+
+
+# Note names for pitch detection
+NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+
+def freq_to_note(freq: float) -> tuple[str, int, float]:
+    """Convert frequency to note name, octave, and cents deviation.
+
+    Returns (note_name, octave, cents) e.g., ('A', 4, 0.0) for 440Hz
+    """
+    if freq <= 0:
+        return ('?', 0, 0.0)
+
+    # A4 = 440Hz = MIDI note 69
+    midi_note = 12 * math.log2(freq / 440.0) + 69
+    midi_rounded = round(midi_note)
+    cents = (midi_note - midi_rounded) * 100
+
+    note_index = midi_rounded % 12
+    octave = (midi_rounded // 12) - 1
+
+    return (NOTE_NAMES[note_index], octave, cents)
+
+
+def amp_to_db(amp: float) -> float:
+    """Convert linear amplitude to decibels."""
+    if amp <= 0:
+        return -float('inf')
+    return 20 * math.log10(amp)
+
+
 class SCClient:
     """Client for communicating with scsynth via OSC."""
 
@@ -37,9 +95,17 @@ class SCClient:
         self.status = ServerStatus()
         self._status_event = threading.Event()
         self._reply_server: osc_server.ThreadingOSCUDPServer | None = None
-        self._node_id = 100000  # Start high to avoid collision with sclang's node IDs
+        # Use time-based starting ID to avoid collision across restarts
+        # Takes lower 20 bits of current time in ms, shifted to high range
+        self._node_id = 1_000_000 + (int(time.time() * 1000) & 0xFFFFF) * 1000
         self._node_lock = threading.Lock()
         self._scsynth_addr = (SCSYNTH_HOST, SCSYNTH_PORT)
+
+        # Audio analysis state
+        self._analyzer_node_id: Optional[int] = None
+        self._analysis_data: Optional[AnalysisData] = None
+        self._analysis_history: deque[AnalysisData] = deque(maxlen=100)
+        self._analysis_lock = threading.Lock()
 
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
@@ -81,6 +147,60 @@ class SCClient:
         """Handle /fail messages."""
         sys.stderr.write(f"[SC] Fail: {args}\n")
 
+    def _handle_analysis(self, address: str, *args):
+        """Handle /mcp/analysis messages from the analyzer synth.
+
+        Expected args: [node_id, reply_id, freq, has_freq, centroid, flatness, rolloff, peak_l, peak_r, rms_l, rms_r]
+        """
+        if len(args) >= 11:
+            data = AnalysisData(
+                timestamp=time.time(),
+                freq=float(args[2]),
+                has_freq=float(args[3]),
+                centroid=float(args[4]),
+                flatness=float(args[5]),
+                rolloff=float(args[6]),
+                peak_l=float(args[7]),
+                peak_r=float(args[8]),
+                rms_l=float(args[9]),
+                rms_r=float(args[10]),
+            )
+            with self._analysis_lock:
+                self._analysis_data = data
+                self._analysis_history.append(data)
+
+    def _handle_meter(self, address: str, *args):
+        """Handle /mcp/meter messages (lightweight metering only).
+
+        Expected args: [node_id, reply_id, peak_l, peak_r, rms_l, rms_r]
+        Only updates if the full analyzer is not running (to avoid overwriting).
+        """
+        # Don't overwrite full analysis data with meter-only data
+        if self._analyzer_node_id is not None:
+            return
+
+        if len(args) >= 6:
+            data = AnalysisData(
+                timestamp=time.time(),
+                peak_l=float(args[2]),
+                peak_r=float(args[3]),
+                rms_l=float(args[4]),
+                rms_r=float(args[5]),
+            )
+            with self._analysis_lock:
+                self._analysis_data = data
+                self._analysis_history.append(data)
+
+    def _handle_node_end(self, address: str, *args):
+        """Handle /n_end messages (node freed notification).
+
+        Used to detect when analyzer synth is freed externally.
+        """
+        if len(args) >= 1:
+            node_id = int(args[0])
+            if node_id == self._analyzer_node_id:
+                self._analyzer_node_id = None
+
     def connect(self) -> tuple[bool, str]:
         """Connect to scsynth server."""
         # Clean up existing connection first
@@ -94,8 +214,11 @@ class SCClient:
             disp.map("/status.reply", self._handle_status_reply)
             disp.map("/done", self._handle_done)
             disp.map("/fail", self._handle_fail)
+            disp.map("/n_end", self._handle_node_end)
+            disp.map("/mcp/analysis", self._handle_analysis)
+            disp.map("/mcp/meter", self._handle_meter)
 
-            self._reply_server = osc_server.ThreadingOSCUDPServer(
+            self._reply_server = ReuseAddrOSCUDPServer(
                 (SCSYNTH_HOST, REPLY_PORT), disp
             )
             thread = threading.Thread(target=self._reply_server.serve_forever, daemon=True)
@@ -162,7 +285,6 @@ class SCClient:
 
         # Schedule release in a background thread
         def release_later():
-            import time
             time.sleep(dur)
             self._send_message("/n_set", [node_id, "gate", 0])
 
@@ -176,8 +298,124 @@ class SCClient:
             return False, "Not connected to scsynth"
 
         if self._send_message("/g_freeAll", [0]):
+            self._analyzer_node_id = None  # Analyzer was freed too
             return True, "All synths freed"
         return False, "Failed to send OSC message to scsynth"
+
+    def start_analyzer(self) -> tuple[bool, str]:
+        """Start the audio analyzer synth.
+
+        Requires mcp_analyzer SynthDef to be loaded in SuperCollider.
+        Run mcp_synthdefs.scd in SuperCollider IDE first.
+        """
+        if not self._reply_server:
+            return False, "Not connected to scsynth. Call sc_connect first."
+
+        if self._analyzer_node_id is not None:
+            return True, "Analyzer already running"
+
+        node_id = self._next_node_id()
+
+        # Create analyzer synth monitoring bus 0 (main output)
+        if not self._send_message("/s_new", [
+            "mcp_analyzer",  # synthdef name
+            node_id,         # node ID
+            1,               # add action (1 = add to tail, so it runs after other synths)
+            0,               # target group
+            "bus", 0,        # monitor main output
+            "replyRate", 10, # 10 updates per second
+        ]):
+            return False, "Failed to send OSC message to scsynth"
+
+        self._analyzer_node_id = node_id
+
+        # Clear old analysis data
+        with self._analysis_lock:
+            self._analysis_data = None
+            self._analysis_history.clear()
+
+        return True, "Analyzer started (monitoring output bus 0)"
+
+    def stop_analyzer(self) -> tuple[bool, str]:
+        """Stop the audio analyzer synth."""
+        if not self._reply_server:
+            return False, "Not connected to scsynth"
+
+        if self._analyzer_node_id is None:
+            return True, "Analyzer not running"
+
+        if self._send_message("/n_free", [self._analyzer_node_id]):
+            self._analyzer_node_id = None
+            return True, "Analyzer stopped"
+        return False, "Failed to send OSC message to scsynth"
+
+    def get_analysis(self) -> tuple[bool, str, Optional[dict]]:
+        """Get the latest audio analysis data.
+
+        Returns (success, message, data_dict)
+        """
+        if self._analyzer_node_id is None:
+            return False, "Analyzer not running. Call sc_start_analyzer first.", None
+
+        with self._analysis_lock:
+            data = self._analysis_data
+
+        if data is None:
+            return False, "No analysis data received yet. Make sure mcp_synthdefs.scd was run in SuperCollider.", None
+
+        # Check if data is stale (older than 1 second)
+        age = time.time() - data.timestamp
+        if age > 1.0:
+            return False, f"Analysis data is stale ({age:.1f}s old). Analyzer may have stopped.", None
+
+        # Convert to friendly format
+        note, octave, cents = freq_to_note(data.freq)
+        is_silent = data.rms_l < 0.001 and data.rms_r < 0.001
+
+        # Infer waveform type from spectral characteristics
+        waveform = "unknown"
+        if is_silent:
+            waveform = "silence"
+        elif data.flatness > 0.5:
+            waveform = "noise"
+        elif data.has_freq > 0.8 and data.freq > 20:
+            # Estimate based on centroid/freq ratio (freq > 20Hz = audible)
+            ratio = data.centroid / data.freq
+            if ratio < 1.5:
+                waveform = "sine"
+            elif ratio < 3:
+                waveform = "triangle"
+            elif ratio < 5:
+                waveform = "square"
+            else:
+                waveform = "saw"
+
+        result = {
+            "pitch": {
+                "freq": round(data.freq, 2),
+                "note": f"{note}{octave}",
+                "cents": round(cents, 1),
+                "confidence": round(data.has_freq, 2),
+            },
+            "timbre": {
+                "centroid": round(data.centroid, 1),
+                "flatness": round(data.flatness, 3),
+                "rolloff": round(data.rolloff, 1),
+                "type": waveform,
+            },
+            "amplitude": {
+                "peak_l": round(data.peak_l, 4),
+                "peak_r": round(data.peak_r, 4),
+                "rms_l": round(data.rms_l, 4),
+                "rms_r": round(data.rms_r, 4),
+                "db_l": round(amp_to_db(data.rms_l), 1),
+                "db_r": round(amp_to_db(data.rms_r), 1),
+            },
+            "is_silent": is_silent,
+            "is_clipping": data.peak_l > 1.0 or data.peak_r > 1.0,
+        }
+
+        return True, "Analysis data retrieved", result
 
     def disconnect(self):
         """Disconnect from server."""
@@ -238,8 +476,80 @@ def sc_free_all() -> str:
     return message
 
 
-# Cleanup on exit
-atexit.register(sc_client.disconnect)
+@mcp.tool()
+def sc_start_analyzer() -> str:
+    """Start the audio analyzer to monitor pitch, timbre, and amplitude.
+
+    Requires the mcp_synthdefs.scd file to be run in SuperCollider IDE first.
+    The analyzer monitors the main output bus and provides real-time analysis.
+    """
+    _, message = sc_client.start_analyzer()
+    return message
+
+
+@mcp.tool()
+def sc_stop_analyzer() -> str:
+    """Stop the audio analyzer."""
+    _, message = sc_client.stop_analyzer()
+    return message
+
+
+@mcp.tool()
+def sc_get_analysis() -> str:
+    """Get the latest audio analysis data.
+
+    Returns pitch (frequency, note, cents deviation), timbre (spectral centroid,
+    flatness, inferred waveform type), and amplitude (peak, RMS, dB) information.
+
+    The analyzer must be running (call sc_start_analyzer first).
+    """
+    success, message, data = sc_client.get_analysis()
+    if not success:
+        return message
+
+    # Format as readable string
+    p = data["pitch"]
+    t = data["timbre"]
+    a = data["amplitude"]
+
+    lines = [
+        "Audio Analysis:",
+        "",
+        f"Pitch: {p['note']} ({p['freq']} Hz, {p['cents']:+.1f} cents)",
+        f"  Confidence: {p['confidence']:.0%}",
+        "",
+        f"Timbre: {t['type']}",
+        f"  Spectral centroid: {t['centroid']:.0f} Hz",
+        f"  Flatness: {t['flatness']:.3f} (0=tonal, 1=noise)",
+        f"  Rolloff (90%): {t['rolloff']:.0f} Hz",
+        "",
+        f"Amplitude:",
+        f"  Peak: L={a['peak_l']:.4f} R={a['peak_r']:.4f}",
+        f"  RMS:  L={a['rms_l']:.4f} R={a['rms_r']:.4f}",
+        f"  dB:   L={a['db_l']:.1f} R={a['db_r']:.1f}",
+        "",
+        f"Silent: {data['is_silent']}",
+        f"Clipping: {data['is_clipping']}",
+    ]
+
+    return "\n".join(lines)
+
+
+def _cleanup():
+    """Clean up resources on exit."""
+    sc_client.disconnect()
+
+
+def _signal_handler(signum, frame):
+    """Handle termination signals gracefully."""
+    _cleanup()
+    sys.exit(0)
+
+
+# Register cleanup handlers
+atexit.register(_cleanup)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def main():
