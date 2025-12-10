@@ -2,7 +2,7 @@
 
 import pytest
 
-from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData, OnsetEvent
+from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData
 
 
 class TestLogEntry:
@@ -139,3 +139,34 @@ class TestOnsetEvent:
         assert event.freq == 880.0
         assert event.timestamp == 0.0  # Still default
         assert event.amplitude == 0.0  # Still default
+
+
+class TestSpectrumData:
+    """Tests for SpectrumData dataclass."""
+
+    def test_default_values(self):
+        data = SpectrumData()
+        assert data.timestamp == 0.0
+        assert data.bands == (0.0,) * 14
+        assert len(data.bands) == 14
+
+    def test_create_with_values(self):
+        bands = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6)
+        data = SpectrumData(
+            timestamp=1234567890.0,
+            bands=bands,
+        )
+        assert data.timestamp == 1234567890.0
+        assert data.bands == bands
+        assert len(data.bands) == 14
+
+    def test_bands_is_tuple(self):
+        """Bands should be a tuple (immutable) for thread safety."""
+        data = SpectrumData()
+        assert isinstance(data.bands, tuple)
+
+    def test_partial_override(self):
+        """Can override just timestamp."""
+        data = SpectrumData(timestamp=100.0)
+        assert data.timestamp == 100.0
+        assert data.bands == (0.0,) * 14  # Still default

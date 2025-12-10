@@ -8,6 +8,10 @@ REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed 
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
 
+# Spectrum analyzer band frequencies (Hz) - logarithmic spacing from ~60Hz to ~16kHz
+# These must match between Python (client.py) and SuperCollider (config.py, mcp_synthdefs.scd)
+SPECTRUM_BAND_FREQUENCIES = [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000]
+
 # SuperCollider code to load SynthDefs and set up OSC forwarding
 # This runs in a persistent sclang process started by the MCP server
 SCLANG_INIT_CODE = r'''
@@ -22,13 +26,14 @@ fork {
 
     // MCP Audio Analyzer SynthDefs
 
-    // Full audio analyzer - pitch, timbre, amplitude, onset
+    // Full audio analyzer - pitch, timbre, amplitude, onset, spectrum
     SynthDef(\mcp_analyzer, {
         arg bus = 0, replyRate = 10, replyID = 1001;
         var in, mono, fft;
         var freq, hasFreq, centroid, flatness, rolloff;
         var peakL, peakR, rmsL, rmsR;
         var onsetTrig;
+        var spectrumBands;
 
         in = In.ar(bus, 2);
         mono = in.sum * 0.5;
@@ -51,6 +56,9 @@ fork {
         // Onset detection
         onsetTrig = Onsets.kr(fft, threshold: 0.3, odftype: \rcomplex);
 
+        // 14-band spectrum analyzer (logarithmic bands from ~60Hz to ~16kHz)
+        spectrumBands = FFTSubbandPower.kr(fft, [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000], square: 0);
+
         // Send main analysis data at regular intervals
         SendReply.kr(
             Impulse.kr(replyRate),
@@ -64,6 +72,14 @@ fork {
             onsetTrig,
             '/mcp/onset',
             [freq, peakL + peakR * 0.5],  // pitch and amplitude at onset
+            replyID
+        );
+
+        // Send spectrum data at regular intervals
+        SendReply.kr(
+            Impulse.kr(replyRate),
+            '/mcp/spectrum',
+            spectrumBands,
             replyID
         );
     }).add;
@@ -101,6 +117,10 @@ OSCFunc({ |msg|
 OSCFunc({ |msg|
     ~mcpAddr.sendMsg(*msg);
 }, '/mcp/onset');
+
+OSCFunc({ |msg|
+    ~mcpAddr.sendMsg(*msg);
+}, '/mcp/spectrum');
 
 OSCFunc({ |msg|
     ~mcpAddr.sendMsg(*msg);

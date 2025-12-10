@@ -196,6 +196,55 @@ class TestScGetOnsets:
         assert "No onset events detected" in result
 
 
+class TestScGetSpectrum:
+    """Tests for sc_get_spectrum tool."""
+
+    def test_formats_spectrum_data(self, mock_sc_client):
+        mock_sc_client.get_spectrum.return_value = (
+            True,
+            "Spectrum data retrieved",
+            {
+                "bands": [
+                    {"freq": 60, "power": 0.1, "db": -20.0},
+                    {"freq": 100, "power": 0.2, "db": -14.0},
+                    {"freq": 156, "power": 0.5, "db": -6.0},
+                    {"freq": 244, "power": 0.3, "db": -10.4},
+                    {"freq": 380, "power": 0.1, "db": -20.0},
+                    {"freq": 594, "power": 0.1, "db": -20.0},
+                    {"freq": 928, "power": 0.1, "db": -20.0},
+                    {"freq": 1449, "power": 0.1, "db": -20.0},
+                    {"freq": 2262, "power": 0.1, "db": -20.0},
+                    {"freq": 3531, "power": 0.1, "db": -20.0},
+                    {"freq": 5512, "power": 0.1, "db": -20.0},
+                    {"freq": 8603, "power": 0.1, "db": -20.0},
+                    {"freq": 13428, "power": 0.05, "db": -26.0},
+                    {"freq": 16000, "power": 0.02, "db": -34.0},
+                ],
+                "band_frequencies": [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000],
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_get_spectrum
+        result = sc_get_spectrum()
+
+        assert "Spectrum Analysis (14 bands)" in result
+        assert "60 Hz" in result
+        assert "16k Hz" in result or "16.0k Hz" in result
+        assert "dB" in result
+
+    def test_returns_error_when_not_running(self, mock_sc_client):
+        mock_sc_client.get_spectrum.return_value = (
+            False,
+            "Analyzer not running. Call sc_start_analyzer first.",
+            None
+        )
+
+        from sc_repl_mcp.tools import sc_get_spectrum
+        result = sc_get_spectrum()
+
+        assert "Analyzer not running" in result
+
+
 class TestScPlaySynth:
     """Tests for sc_play_synth tool."""
 

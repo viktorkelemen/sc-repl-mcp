@@ -7,7 +7,7 @@ import time
 import pytest
 
 from sc_repl_mcp.client import SCClient
-from sc_repl_mcp.types import ServerStatus, AnalysisData, OnsetEvent
+from sc_repl_mcp.types import ServerStatus, AnalysisData, OnsetEvent, SpectrumData
 
 
 class TestHandleStatusReply:
@@ -421,3 +421,138 @@ class TestLogManagement:
         assert len(logs) == 500
         # Should have dropped the oldest messages
         assert "Message 100" in logs[0].message
+
+
+class TestHandleSpectrum:
+    """Tests for _handle_spectrum handler."""
+
+    def test_parses_full_spectrum(self, client):
+        """Handler should parse all 16 args (node_id, reply_id, 14 bands) into SpectrumData."""
+        # args: node_id, reply_id, band0, band1, ..., band13
+        bands = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6]
+        client._handle_spectrum(
+            "/mcp/spectrum",
+            1000,   # node_id
+            1001,   # reply_id
+            *bands  # 14 band values
+        )
+
+        data = client._spectrum_data
+        assert data is not None
+        assert data.bands == tuple(bands)
+        assert len(data.bands) == 14
+        assert data.timestamp > 0  # Should be set to current time
+
+    def test_ignores_short_args(self, client):
+        """Handler should not crash with fewer than 16 args."""
+        client._handle_spectrum("/mcp/spectrum", 1000, 1001, 0.1, 0.2, 0.3)  # Only 5 args
+
+        assert client._spectrum_data is None
+
+    def test_updates_spectrum_data(self, client):
+        """Handler should update spectrum data on each call."""
+        bands1 = [0.1] * 14
+        bands2 = [0.9] * 14
+
+        client._handle_spectrum("/mcp/spectrum", 1000, 1001, *bands1)
+        assert client._spectrum_data.bands == tuple(bands1)
+
+        client._handle_spectrum("/mcp/spectrum", 1000, 1001, *bands2)
+        assert client._spectrum_data.bands == tuple(bands2)
+
+    def test_bands_are_floats(self, client):
+        """Handler should convert band values to floats."""
+        # Pass integers
+        bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        client._handle_spectrum("/mcp/spectrum", 1000, 1001, *bands)
+
+        data = client._spectrum_data
+        assert all(isinstance(b, float) for b in data.bands)
+
+
+class TestGetSpectrum:
+    """Tests for get_spectrum method."""
+
+    def test_returns_error_when_analyzer_not_running(self, client):
+        """get_spectrum should fail when analyzer not running."""
+        assert client._analyzer_node_id is None
+
+        success, message, data = client.get_spectrum()
+
+        assert success is False
+        assert "Analyzer not running" in message
+        assert data is None
+
+    def test_returns_error_when_no_data(self, client):
+        """get_spectrum should fail when no data received yet."""
+        client._analyzer_node_id = 1000  # Pretend analyzer is running
+
+        success, message, data = client.get_spectrum()
+
+        assert success is False
+        assert "No spectrum data" in message
+        assert data is None
+
+    def test_returns_error_when_data_stale(self, client):
+        """get_spectrum should fail when data is too old."""
+        client._analyzer_node_id = 1000
+        # Create data with old timestamp
+        client._spectrum_data = SpectrumData(
+            timestamp=time.time() - 2.0,  # 2 seconds old
+            bands=(0.5,) * 14
+        )
+
+        success, message, data = client.get_spectrum()
+
+        assert success is False
+        assert "stale" in message
+        assert data is None
+
+    def test_returns_formatted_spectrum(self, client):
+        """get_spectrum should return properly formatted data."""
+        client._analyzer_node_id = 1000
+        bands = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.9, 0.8, 0.7, 0.6)
+        client._spectrum_data = SpectrumData(
+            timestamp=time.time(),
+            bands=bands
+        )
+
+        success, message, data = client.get_spectrum()
+
+        assert success is True
+        assert data is not None
+        assert "bands" in data
+        assert "band_frequencies" in data
+        assert len(data["bands"]) == 14
+        assert len(data["band_frequencies"]) == 14
+
+    def test_bands_have_freq_power_db(self, client):
+        """Each band should have freq, power, and db fields."""
+        client._analyzer_node_id = 1000
+        client._spectrum_data = SpectrumData(
+            timestamp=time.time(),
+            bands=(0.5,) * 14
+        )
+
+        success, _, data = client.get_spectrum()
+
+        assert success is True
+        for band in data["bands"]:
+            assert "freq" in band
+            assert "power" in band
+            assert "db" in band
+
+    def test_db_floored_at_minus_60(self, client):
+        """dB values should be floored at -60."""
+        client._analyzer_node_id = 1000
+        # Very small power values
+        client._spectrum_data = SpectrumData(
+            timestamp=time.time(),
+            bands=(0.00001,) * 14
+        )
+
+        success, _, data = client.get_spectrum()
+
+        assert success is True
+        for band in data["bands"]:
+            assert band["db"] >= -60.0
