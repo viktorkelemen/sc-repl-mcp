@@ -3,14 +3,13 @@
 // NOTE: This is now optional - sc_connect loads these automatically via sclang
 
 (
-// Full audio analyzer - pitch, timbre, amplitude, onset, spectrum
+// Full audio analyzer - pitch, timbre, amplitude, onset
 SynthDef(\mcp_analyzer, {
     arg bus = 0, replyRate = 10, replyID = 1001;
     var in, mono, fft;
     var freq, hasFreq, centroid, flatness, rolloff;
     var peakL, peakR, rmsL, rmsR;
     var onsetTrig;
-    var spectrumBands;
 
     // Read stereo output
     in = In.ar(bus, 2);
@@ -36,9 +35,6 @@ SynthDef(\mcp_analyzer, {
     // Onset detection
     onsetTrig = Onsets.kr(fft, threshold: 0.3, odftype: \rcomplex);
 
-    // 14-band spectrum analyzer (logarithmic bands from ~60Hz to ~16kHz)
-    spectrumBands = FFTSubbandPower.kr(fft, [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000], square: false);
-
     // Send main analysis data at regular intervals
     SendReply.kr(
         Impulse.kr(replyRate),
@@ -52,14 +48,6 @@ SynthDef(\mcp_analyzer, {
         onsetTrig,
         '/mcp/onset',
         [freq, peakL + peakR * 0.5],  // pitch and amplitude at onset
-        replyID
-    );
-
-    // Send spectrum data at regular intervals
-    SendReply.kr(
-        Impulse.kr(replyRate),
-        '/mcp/spectrum',
-        spectrumBands,
         replyID
     );
 }).add;
@@ -97,10 +85,6 @@ SynthDef(\mcp_meter, {
     // Log onsets to post window
     "ONSET detected: % Hz".format(msg[3].round(0.1)).postln;
 }, '/mcp/onset');
-
-~mcpSpectrumForwarder = OSCFunc({ |msg|
-    ~mcpAddr.sendMsg(*msg);
-}, '/mcp/spectrum');
 
 ~mcpMeterForwarder = OSCFunc({ |msg|
     ~mcpAddr.sendMsg(*msg);

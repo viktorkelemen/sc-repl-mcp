@@ -17,7 +17,7 @@ from .config import (
     REPLY_PORT,
     SCLANG_INIT_CODE,
 )
-from .types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData
+from .types import LogEntry, ServerStatus, AnalysisData, OnsetEvent
 from .utils import freq_to_note, amp_to_db, kill_process_on_port
 from .sclang import find_sclang
 
@@ -49,10 +49,6 @@ class SCClient:
         # Onset detection state
         self._onset_events: deque[OnsetEvent] = deque(maxlen=100)
         self._onset_lock = threading.Lock()
-
-        # Spectrum analyzer state
-        self._spectrum_data: Optional[SpectrumData] = None
-        self._spectrum_lock = threading.Lock()
 
         # Persistent sclang process for SynthDefs and OSC forwarding
         self._sclang_process: Optional[subprocess.Popen] = None
@@ -198,22 +194,6 @@ class SCClient:
         with self._onset_lock:
             self._onset_events.append(event)
 
-    def _handle_spectrum(self, address: str, *args):
-        """Handle /mcp/spectrum messages (16-band spectrum analyzer).
-
-        Expected args: [node_id, reply_id, band0, band1, ..., band13]
-        """
-        if len(args) < 16:  # node_id + reply_id + 14 bands
-            return
-
-        bands = tuple(float(args[i]) for i in range(2, 16))
-        data = SpectrumData(
-            timestamp=time.time(),
-            bands=bands,
-        )
-        with self._spectrum_lock:
-            self._spectrum_data = data
-
     def _start_sclang(self) -> tuple[bool, str]:
         """Start persistent sclang process for SynthDefs and OSC forwarding."""
         # Stop any existing sclang process
@@ -320,7 +300,6 @@ class SCClient:
             disp.map("/mcp/analysis", self._handle_analysis)
             disp.map("/mcp/meter", self._handle_meter)
             disp.map("/mcp/onset", self._handle_onset)
-            disp.map("/mcp/spectrum", self._handle_spectrum)
 
             # Try to bind, killing orphaned processes if needed
             for attempt in range(2):
@@ -534,8 +513,6 @@ class SCClient:
             self._analysis_history.clear()
         with self._onset_lock:
             self._onset_events.clear()
-        with self._spectrum_lock:
-            self._spectrum_data = None
 
         return True, "Analyzer started (monitoring output bus 0)"
 
@@ -626,45 +603,6 @@ class SCClient:
                         pass  # Already removed
 
         return events
-
-    def get_spectrum(self) -> tuple[bool, str, Optional[dict]]:
-        """Get the latest spectrum analyzer data.
-
-        Returns (success, message, data_dict) with 14 frequency bands.
-        """
-        if self._analyzer_node_id is None:
-            return False, "Analyzer not running. Call sc_start_analyzer first.", None
-
-        with self._spectrum_lock:
-            data = self._spectrum_data
-
-        if data is None:
-            return False, "No spectrum data received yet.", None
-
-        # Check if data is stale
-        age = time.time() - data.timestamp
-        if age > 1.0:
-            return False, f"Spectrum data is stale ({age:.1f}s old).", None
-
-        # Band center frequencies (Hz)
-        band_freqs = [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000]
-
-        # Convert to dB and create labeled result
-        bands_db = []
-        for i, (freq, power) in enumerate(zip(band_freqs, data.bands)):
-            db = amp_to_db(power) if power > 0 else -60.0
-            bands_db.append({
-                "freq": freq,
-                "power": round(power, 6),
-                "db": round(max(db, -60.0), 1),  # Floor at -60dB
-            })
-
-        result = {
-            "bands": bands_db,
-            "band_frequencies": band_freqs,
-        }
-
-        return True, "Spectrum data retrieved", result
 
     def disconnect(self):
         """Disconnect from server and stop sclang."""
