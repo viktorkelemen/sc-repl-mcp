@@ -2,7 +2,7 @@
 
 import pytest
 
-from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData
+from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData, OnsetEvent
 
 
 class TestLogEntry:
@@ -112,3 +112,30 @@ class TestAnalysisData:
         assert data.peak_r == 0.75
         assert data.rms_l == 0.3
         assert data.rms_r == 0.28
+
+
+class TestOnsetEvent:
+    """Tests for OnsetEvent dataclass."""
+
+    def test_default_values(self):
+        event = OnsetEvent()
+        assert event.timestamp == 0.0
+        assert event.freq == 0.0
+        assert event.amplitude == 0.0
+
+    def test_create_with_values(self):
+        event = OnsetEvent(
+            timestamp=1234567890.0,
+            freq=440.0,
+            amplitude=0.5,
+        )
+        assert event.timestamp == 1234567890.0
+        assert event.freq == 440.0
+        assert event.amplitude == 0.5
+
+    def test_partial_override(self):
+        """Can override just some defaults."""
+        event = OnsetEvent(freq=880.0)
+        assert event.freq == 880.0
+        assert event.timestamp == 0.0  # Still default
+        assert event.amplitude == 0.0  # Still default

@@ -167,6 +167,35 @@ class TestScGetAnalysis:
         assert "Analyzer not running" in result
 
 
+class TestScGetOnsets:
+    """Tests for sc_get_onsets tool."""
+
+    def test_formats_onset_events(self, mock_sc_client):
+        from sc_repl_mcp.types import OnsetEvent
+
+        mock_sc_client.get_onsets.return_value = [
+            OnsetEvent(timestamp=1000.0, freq=440.0, amplitude=0.5),
+            OnsetEvent(timestamp=1000.1, freq=880.0, amplitude=0.6),
+        ]
+
+        from sc_repl_mcp.tools import sc_get_onsets
+        result = sc_get_onsets()
+
+        assert "Onset Events (2 detected)" in result
+        assert "440" in result
+        assert "880" in result
+        assert "A4" in result  # Note name for 440 Hz
+        assert "A5" in result  # Note name for 880 Hz
+
+    def test_returns_no_events_message(self, mock_sc_client):
+        mock_sc_client.get_onsets.return_value = []
+
+        from sc_repl_mcp.tools import sc_get_onsets
+        result = sc_get_onsets()
+
+        assert "No onset events detected" in result
+
+
 class TestScPlaySynth:
     """Tests for sc_play_synth tool."""
 

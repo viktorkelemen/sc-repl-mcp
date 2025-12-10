@@ -7,7 +7,7 @@ import time
 import pytest
 
 from sc_repl_mcp.client import SCClient
-from sc_repl_mcp.types import ServerStatus, AnalysisData
+from sc_repl_mcp.types import ServerStatus, AnalysisData, OnsetEvent
 
 
 class TestHandleStatusReply:
@@ -253,6 +253,107 @@ class TestHandleMeter:
         client._handle_meter("/mcp/meter", 1000, 1002)  # Only 3 args
 
         assert client._analysis_data is None
+
+
+class TestHandleOnset:
+    """Tests for _handle_onset handler."""
+
+    def test_parses_onset_event(self, client):
+        """Handler should parse onset data into OnsetEvent."""
+        # args: node_id, reply_id, freq, amplitude
+        client._handle_onset(
+            "/mcp/onset",
+            1000,   # node_id
+            1001,   # reply_id
+            440.0,  # freq
+            0.5,    # amplitude
+        )
+
+        assert len(client._onset_events) == 1
+        event = client._onset_events[0]
+        assert event.freq == 440.0
+        assert event.amplitude == 0.5
+        assert event.timestamp > 0
+
+    def test_adds_multiple_events(self, client):
+        """Handler should accumulate multiple onset events."""
+        for i in range(5):
+            client._handle_onset("/mcp/onset", 1000, 1001, float(440 + i * 100), 0.3 + i * 0.1)
+
+        assert len(client._onset_events) == 5
+        # Check last event
+        assert client._onset_events[-1].freq == 840.0
+        assert client._onset_events[-1].amplitude == 0.7
+
+    def test_ignores_short_args(self, client):
+        """Handler should not crash with fewer than 4 args."""
+        client._handle_onset("/mcp/onset", 1000, 1001)  # Only 3 args
+
+        assert len(client._onset_events) == 0
+
+    def test_respects_max_buffer_size(self, client):
+        """Onset buffer should not exceed maxlen."""
+        # Buffer maxlen is 100
+        for i in range(150):
+            client._handle_onset("/mcp/onset", 1000, 1001, float(i), 0.5)
+
+        assert len(client._onset_events) == 100
+        # Oldest events should be dropped, newest kept
+        assert client._onset_events[0].freq == 50.0  # First 50 were dropped
+        assert client._onset_events[-1].freq == 149.0
+
+
+class TestGetOnsets:
+    """Tests for get_onsets method."""
+
+    def test_returns_all_events(self, client):
+        """get_onsets should return all events by default."""
+        client._handle_onset("/mcp/onset", 1000, 1001, 440.0, 0.5)
+        client._handle_onset("/mcp/onset", 1000, 1001, 880.0, 0.6)
+
+        events = client.get_onsets()
+
+        assert len(events) == 2
+        assert events[0].freq == 440.0
+        assert events[1].freq == 880.0
+
+    def test_clears_events_by_default(self, client):
+        """get_onsets should clear events after reading by default."""
+        client._handle_onset("/mcp/onset", 1000, 1001, 440.0, 0.5)
+
+        events1 = client.get_onsets()
+        events2 = client.get_onsets()
+
+        assert len(events1) == 1
+        assert len(events2) == 0
+
+    def test_preserves_events_when_clear_false(self, client):
+        """get_onsets should preserve events when clear=False."""
+        client._handle_onset("/mcp/onset", 1000, 1001, 440.0, 0.5)
+
+        events1 = client.get_onsets(clear=False)
+        events2 = client.get_onsets(clear=False)
+
+        assert len(events1) == 1
+        assert len(events2) == 1
+
+    def test_filters_by_timestamp(self, client):
+        """get_onsets should filter events by since parameter."""
+        # Add event, record time, add another event
+        client._handle_onset("/mcp/onset", 1000, 1001, 440.0, 0.5)
+        cutoff_time = time.time()
+        time.sleep(0.01)  # Small delay to ensure different timestamps
+        client._handle_onset("/mcp/onset", 1000, 1001, 880.0, 0.6)
+
+        events = client.get_onsets(since=cutoff_time)
+
+        assert len(events) == 1
+        assert events[0].freq == 880.0
+
+    def test_returns_empty_list_when_no_events(self, client):
+        """get_onsets should return empty list when no events."""
+        events = client.get_onsets()
+        assert events == []
 
 
 class TestNodeId:
