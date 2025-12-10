@@ -102,7 +102,7 @@ def sc_get_analysis() -> str:
         f"Pitch: {p['note']} ({p['freq']} Hz, {p['cents']:+.1f} cents)",
         f"  Confidence: {p['confidence']:.0%}",
         "",
-        f"Timbre: {t['type']}",
+        f"Timbre:",
         f"  Spectral centroid: {t['centroid']:.0f} Hz",
         f"  Flatness: {t['flatness']:.3f} (0=tonal, 1=noise)",
         f"  Rolloff (90%): {t['rolloff']:.0f} Hz",

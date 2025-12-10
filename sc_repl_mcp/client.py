@@ -122,9 +122,7 @@ class SCClient:
 
         Expected args: [node_id, reply_id, freq, has_freq, centroid, flatness, rolloff, peak_l, peak_r, rms_l, rms_r]
         """
-        # Debug: log message details
         if len(args) < 11:
-            sys.stderr.write(f"[MCP] Analysis: unexpected arg count {len(args)}: {args}\n")
             return
 
         data = AnalysisData(
@@ -134,7 +132,7 @@ class SCClient:
             centroid=float(args[4]),
             flatness=float(args[5]),
             rolloff=float(args[6]),
-            peak_l=peak_l,
+            peak_l=float(args[7]),
             peak_r=float(args[8]),
             rms_l=float(args[9]),
             rms_r=float(args[10]),
@@ -531,24 +529,6 @@ class SCClient:
         note, octave, cents = freq_to_note(data.freq)
         is_silent = data.rms_l < 0.001 and data.rms_r < 0.001
 
-        # Infer waveform type from spectral characteristics
-        waveform = "unknown"
-        if is_silent:
-            waveform = "silence"
-        elif data.flatness > 0.5:
-            waveform = "noise"
-        elif data.has_freq > 0.8 and data.freq > 20:
-            # Estimate based on centroid/freq ratio (freq > 20Hz = audible)
-            ratio = data.centroid / data.freq
-            if ratio < 1.5:
-                waveform = "sine"
-            elif ratio < 3:
-                waveform = "triangle"
-            elif ratio < 5:
-                waveform = "square"
-            else:
-                waveform = "saw"
-
         result = {
             "pitch": {
                 "freq": round(data.freq, 2),
@@ -560,7 +540,6 @@ class SCClient:
                 "centroid": round(data.centroid, 1),
                 "flatness": round(data.flatness, 3),
                 "rolloff": round(data.rolloff, 1),
-                "type": waveform,
             },
             "amplitude": {
                 "peak_l": round(data.peak_l, 4),
