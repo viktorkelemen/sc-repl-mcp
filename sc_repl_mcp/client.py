@@ -505,8 +505,7 @@ class SCClient:
     def start_analyzer(self) -> tuple[bool, str]:
         """Start the audio analyzer synth.
 
-        Requires mcp_analyzer SynthDef to be loaded in SuperCollider.
-        Run mcp_synthdefs.scd in SuperCollider IDE first.
+        Requires sc_connect to be called first (which loads mcp_analyzer SynthDef).
         """
         if not self._reply_server:
             return False, "Not connected to scsynth. Call sc_connect first."
@@ -565,7 +564,7 @@ class SCClient:
             data = self._analysis_data
 
         if data is None:
-            return False, "No analysis data received yet. Make sure mcp_synthdefs.scd was run in SuperCollider.", None
+            return False, "No analysis data received yet. The analyzer SynthDef may have failed to load.", None
 
         # Check if data is stale (older than 1 second)
         age = time.time() - data.timestamp

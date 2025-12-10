@@ -64,8 +64,8 @@ def sc_free_all() -> str:
 def sc_start_analyzer() -> str:
     """Start the audio analyzer to monitor pitch, timbre, and amplitude.
 
-    Requires the mcp_synthdefs.scd file to be run in SuperCollider IDE first.
     The analyzer monitors the main output bus and provides real-time analysis.
+    Requires sc_connect to be called first (which loads the analyzer SynthDefs).
     """
     _, message = sc_client.start_analyzer()
     return message
