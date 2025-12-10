@@ -22,61 +22,109 @@ fork {
 
     // MCP Audio Analyzer SynthDefs
 
-    // Full audio analyzer - pitch, timbre, amplitude
+    // Full audio analyzer - pitch, timbre, amplitude, onset, spectrum
     SynthDef(\mcp_analyzer, {
-    arg bus = 0, replyRate = 10, replyID = 1001;
-    var in, mono, fft;
-    var freq, hasFreq, centroid, flatness, rolloff;
-    var peakL, peakR, rmsL, rmsR;
+        arg bus = 0, replyRate = 10, replyID = 1001;
+        var in, mono, fft;
+        var freq, hasFreq, centroid, flatness, rolloff;
+        var peakL, peakR, rmsL, rmsR;
+        var onset, onsetTrig;
+        var spectrum, spectrumBands;
 
-    in = In.ar(bus, 2);
-    mono = in.sum * 0.5;
-    fft = FFT(LocalBuf(2048), mono);
+        in = In.ar(bus, 2);
+        mono = in.sum * 0.5;
+        fft = FFT(LocalBuf(2048), mono);
 
-    # freq, hasFreq = Pitch.kr(mono, ampThreshold: 0.01, median: 7);
-    centroid = SpecCentroid.kr(fft);
-    flatness = SpecFlatness.kr(fft);
-    rolloff = SpecPcile.kr(fft, 0.9);
+        // Pitch detection
+        # freq, hasFreq = Pitch.kr(mono, ampThreshold: 0.01, median: 7);
 
-    peakL = PeakFollower.kr(in[0], 0.99);
-    peakR = PeakFollower.kr(in[1], 0.99);
-    rmsL = RunningSum.rms(in[0], 1024);
-    rmsR = RunningSum.rms(in[1], 1024);
+        // Timbral features
+        centroid = SpecCentroid.kr(fft);
+        flatness = SpecFlatness.kr(fft);
+        rolloff = SpecPcile.kr(fft, 0.9);
 
-    SendReply.kr(
-        Impulse.kr(replyRate),
-        '/mcp/analysis',
-        [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR],
-        replyID
-    );
-}).add;
+        // Amplitude (stereo)
+        peakL = PeakFollower.kr(in[0], 0.99);
+        peakR = PeakFollower.kr(in[1], 0.99);
+        rmsL = RunningSum.rms(in[0], 1024);
+        rmsR = RunningSum.rms(in[1], 1024);
 
-// Simple peak/RMS meter only (lighter weight)
-SynthDef(\mcp_meter, {
-    arg bus = 0, replyRate = 20, replyID = 1002;
-    var in, peakL, peakR, rmsL, rmsR;
+        // Onset detection
+        onsetTrig = Onsets.kr(fft, threshold: 0.3, odftype: \rcomplex);
 
-    in = In.ar(bus, 2);
-    peakL = PeakFollower.kr(in[0], 0.99);
-    peakR = PeakFollower.kr(in[1], 0.99);
-    rmsL = RunningSum.rms(in[0], 512);
-    rmsR = RunningSum.rms(in[1], 512);
+        // 16-band spectrum analyzer (logarithmic bands from ~60Hz to ~16kHz)
+        // Band center frequencies: 60, 100, 156, 244, 380, 594, 928, 1449,
+        //                          2262, 3531, 5512, 8603, 13428, 16000 Hz (approx)
+        spectrumBands = FFTSubbandPower.kr(fft, [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000], square: false);
 
-    SendReply.kr(
-        Impulse.kr(replyRate),
-        '/mcp/meter',
-        [peakL, peakR, rmsL, rmsR],
-        replyID
-    );
-}).add;
+        // Send main analysis data at regular intervals
+        SendReply.kr(
+            Impulse.kr(replyRate),
+            '/mcp/analysis',
+            [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR],
+            replyID
+        );
+
+        // Send onset trigger immediately when detected
+        SendReply.kr(
+            onsetTrig,
+            '/mcp/onset',
+            [freq, peakL + peakR * 0.5],  // pitch and amplitude at onset
+            replyID
+        );
+
+        // Send spectrum data at regular intervals
+        SendReply.kr(
+            Impulse.kr(replyRate),
+            '/mcp/spectrum',
+            spectrumBands,
+            replyID
+        );
+    }).add;
+
+    // Simple peak/RMS meter only (lighter weight)
+    SynthDef(\mcp_meter, {
+        arg bus = 0, replyRate = 20, replyID = 1002;
+        var in, peakL, peakR, rmsL, rmsR;
+
+        in = In.ar(bus, 2);
+        peakL = PeakFollower.kr(in[0], 0.99);
+        peakR = PeakFollower.kr(in[1], 0.99);
+        rmsL = RunningSum.rms(in[0], 512);
+        rmsR = RunningSum.rms(in[1], 512);
+
+        SendReply.kr(
+            Impulse.kr(replyRate),
+            '/mcp/meter',
+            [peakL, peakR, rmsL, rmsR],
+            replyID
+        );
+    }).add;
 
     "MCP SynthDefs loaded".postln;
 };  // end fork
 
-// NOTE: OSC forwarding is handled by running mcp_synthdefs.scd in the IDE
-// Server.remote clients don't reliably receive SendReply, so we don't set up
-// forwarding here. The IDE's sclang will forward analysis data to port 57130.
-"MCP sclang ready (OSC forwarding handled by IDE)".postln;
+// OSC forwarding: relay SendReply messages from scsynth to MCP Python server
+// SendReply sends to sclang (port 57120), we forward to MCP (port 57130)
+~mcpAddr = NetAddr("127.0.0.1", 57130);
+
+OSCFunc({ |msg|
+    ~mcpAddr.sendMsg(*msg);
+}, '/mcp/analysis');
+
+OSCFunc({ |msg|
+    ~mcpAddr.sendMsg(*msg);
+}, '/mcp/onset');
+
+OSCFunc({ |msg|
+    ~mcpAddr.sendMsg(*msg);
+}, '/mcp/spectrum');
+
+OSCFunc({ |msg|
+    ~mcpAddr.sendMsg(*msg);
+}, '/mcp/meter');
+
+"MCP sclang ready with OSC forwarding to port 57130".postln;
 
 // Keep sclang running indefinitely
 { inf.wait }.defer;

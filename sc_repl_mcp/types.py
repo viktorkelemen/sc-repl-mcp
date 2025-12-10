@@ -40,3 +40,20 @@ class AnalysisData:
     peak_r: float = 0.0
     rms_l: float = 0.0
     rms_r: float = 0.0
+
+
+@dataclass
+class OnsetEvent:
+    """An onset (attack/transient) detection event."""
+    timestamp: float = 0.0
+    freq: float = 0.0      # pitch at onset
+    amplitude: float = 0.0  # amplitude at onset
+
+
+@dataclass
+class SpectrumData:
+    """16-band spectrum analyzer data."""
+    timestamp: float = 0.0
+    # Band powers (logarithmic spacing from ~60Hz to ~16kHz)
+    # Frequencies: 60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000 Hz
+    bands: tuple = (0.0,) * 14  # 14 bands

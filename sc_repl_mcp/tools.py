@@ -120,6 +120,69 @@ def sc_get_analysis() -> str:
 
 
 @mcp.tool()
+def sc_get_onsets() -> str:
+    """Get recent onset (attack/transient) events detected by the analyzer.
+
+    Returns a list of detected sound onsets with their timestamps, pitch, and amplitude.
+    Useful for rhythm detection and understanding when sounds start.
+
+    The analyzer must be running (call sc_start_analyzer first).
+    Events are cleared after reading to avoid duplicates.
+    """
+    from .utils import freq_to_note
+
+    events = sc_client.get_onsets()
+
+    if not events:
+        return "No onset events detected (or analyzer not running)"
+
+    lines = [f"Onset Events ({len(events)} detected):", ""]
+
+    for event in events:
+        note, octave, _ = freq_to_note(event.freq)
+        lines.append(
+            f"  [{event.timestamp:.3f}] {note}{octave} ({event.freq:.0f} Hz) amp={event.amplitude:.3f}"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def sc_get_spectrum() -> str:
+    """Get the current spectrum analyzer data (14 frequency bands).
+
+    Returns power levels across the frequency spectrum from ~60Hz to ~16kHz.
+    Useful for understanding the frequency content of the current sound.
+
+    The analyzer must be running (call sc_start_analyzer first).
+    """
+    success, message, data = sc_client.get_spectrum()
+    if not success:
+        return message
+
+    lines = ["Spectrum Analysis (14 bands):", ""]
+
+    # Create a simple ASCII visualization
+    for band in data["bands"]:
+        freq = band["freq"]
+        db = band["db"]
+        # Scale dB to bar length (0 to 40 chars, -60dB to 0dB)
+        bar_len = int((db + 60) / 60 * 40)
+        bar_len = max(0, min(40, bar_len))
+        bar = "█" * bar_len
+
+        # Format frequency label
+        if freq >= 1000:
+            freq_str = f"{freq/1000:.1f}k".rjust(5)
+        else:
+            freq_str = f"{freq}".rjust(5)
+
+        lines.append(f"  {freq_str} Hz │{bar} {db:.0f} dB")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def sc_play_synth(
     synthdef: str,
     params: Optional[dict[str, Any]] = None,
