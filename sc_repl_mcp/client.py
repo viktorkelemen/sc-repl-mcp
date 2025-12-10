@@ -127,11 +127,6 @@ class SCClient:
             sys.stderr.write(f"[MCP] Analysis: unexpected arg count {len(args)}: {args}\n")
             return
 
-        peak_l = float(args[7])
-        # Debug: log ALL messages to a file for diagnosis
-        with open("/tmp/mcp_analysis_debug.log", "a") as f:
-            f.write(f"peak={peak_l:.6f} freq={float(args[2]):.1f}\n")
-
         data = AnalysisData(
             timestamp=time.time(),
             freq=float(args[2]),
