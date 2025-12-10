@@ -1,0 +1,94 @@
+"""Configuration constants for SC-REPL MCP Server."""
+
+# Network configuration
+SCSYNTH_HOST = "127.0.0.1"
+SCSYNTH_PORT = 57110
+REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed on connect)
+
+# Execution limits
+MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
+
+# SuperCollider code to load SynthDefs and set up OSC forwarding
+# This runs in a persistent sclang process started by the MCP server
+SCLANG_INIT_CODE = r'''
+// Connect to the existing scsynth server (running in SuperCollider.app)
+// This ensures SynthDefs are added to the correct server
+Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", 57110));
+s = Server.default;
+// Server.remote handles connection automatically
+
+fork {
+    0.5.wait;  // Give server connection time to establish
+
+    // MCP Audio Analyzer SynthDefs
+
+    // Full audio analyzer - pitch, timbre, amplitude
+    SynthDef(\mcp_analyzer, {
+    arg bus = 0, replyRate = 10, replyID = 1001;
+    var in, mono, fft;
+    var freq, hasFreq, centroid, flatness, rolloff;
+    var peakL, peakR, rmsL, rmsR;
+
+    in = In.ar(bus, 2);
+    mono = in.sum * 0.5;
+    fft = FFT(LocalBuf(2048), mono);
+
+    # freq, hasFreq = Pitch.kr(mono, ampThreshold: 0.01, median: 7);
+    centroid = SpecCentroid.kr(fft);
+    flatness = SpecFlatness.kr(fft);
+    rolloff = SpecPcile.kr(fft, 0.9);
+
+    peakL = PeakFollower.kr(in[0], 0.99);
+    peakR = PeakFollower.kr(in[1], 0.99);
+    rmsL = RunningSum.rms(in[0], 1024);
+    rmsR = RunningSum.rms(in[1], 1024);
+
+    SendReply.kr(
+        Impulse.kr(replyRate),
+        '/mcp/analysis',
+        [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR],
+        replyID
+    );
+}).add;
+
+// Simple peak/RMS meter only (lighter weight)
+SynthDef(\mcp_meter, {
+    arg bus = 0, replyRate = 20, replyID = 1002;
+    var in, peakL, peakR, rmsL, rmsR;
+
+    in = In.ar(bus, 2);
+    peakL = PeakFollower.kr(in[0], 0.99);
+    peakR = PeakFollower.kr(in[1], 0.99);
+    rmsL = RunningSum.rms(in[0], 512);
+    rmsR = RunningSum.rms(in[1], 512);
+
+    SendReply.kr(
+        Impulse.kr(replyRate),
+        '/mcp/meter',
+        [peakL, peakR, rmsL, rmsR],
+        replyID
+    );
+}).add;
+
+    "MCP SynthDefs loaded".postln;
+};  // end fork
+
+// NOTE: OSC forwarding is handled by running mcp_synthdefs.scd in the IDE
+// Server.remote clients don't reliably receive SendReply, so we don't set up
+// forwarding here. The IDE's sclang will forward analysis data to port 57130.
+"MCP sclang ready (OSC forwarding handled by IDE)".postln;
+
+// Keep sclang running indefinitely
+{ inf.wait }.defer;
+'''
+
+# Prefixes to filter from sclang stderr (startup noise)
+SCLANG_STDERR_SKIP_PREFIXES = (
+    'compiling class library',
+    'NumPrimitives',
+    'Welcome to SuperCollider',
+    "type 'help'",
+    'Found',
+    'Compiling',
+    'Read',
+)
