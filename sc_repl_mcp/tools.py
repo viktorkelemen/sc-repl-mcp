@@ -246,7 +246,7 @@ s.sendMsg(\\d_load, SynthDef.synthDefDir ++ "{name}.scsyndef");
 
 
 @mcp.tool()
-def sc_eval(code: str, timeout: float = 30.0) -> str:
+def sc_eval(code: str, timeout: float = 120.0) -> str:
     """Execute arbitrary SuperCollider (sclang) code.
 
     This spawns a new sclang process to execute the code. Useful for:
@@ -256,7 +256,7 @@ def sc_eval(code: str, timeout: float = 30.0) -> str:
 
     Args:
         code: SuperCollider code to execute
-        timeout: Maximum execution time in seconds (default 30)
+        timeout: Maximum execution time in seconds (default 120)
 
     IMPORTANT - Common pitfalls to avoid:
 
