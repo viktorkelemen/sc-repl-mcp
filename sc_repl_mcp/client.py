@@ -1,5 +1,6 @@
 """SuperCollider OSC client for SC-REPL MCP Server."""
 
+import math
 import os
 import subprocess
 import sys
@@ -830,7 +831,6 @@ class SCClient:
 
         # Calculate pitch difference in semitones
         # Handle silent sounds (freq=0) explicitly
-        import math
         if current.freq > 0 and ref_analysis.freq > 0:
             pitch_diff_semitones = 12 * math.log2(current.freq / ref_analysis.freq)
             pitch_valid = True
@@ -868,28 +868,39 @@ class SCClient:
         # Flatness difference (tonal vs noise character)
         flatness_diff = current.flatness - ref_analysis.flatness
 
-        # Calculate overall similarity score (0-100%)
-        # Weight different aspects
+        # Calculate individual component scores (0-100%)
+        # Scoring penalties per unit difference
+        PITCH_PENALTY_PER_SEMITONE = 10  # 10% per semitone
+        BRIGHTNESS_PENALTY_PER_OCTAVE = 50  # 50% per octave
+        LOUDNESS_PENALTY_PER_SONE = 5  # 5% per sone
+        FLATNESS_PENALTY = 200  # flatness is 0-1
+
         if pitch_valid:
-            pitch_score = max(0, 100 - abs(pitch_diff_semitones) * 10)  # 10% per semitone
+            pitch_score = max(0, 100 - abs(pitch_diff_semitones) * PITCH_PENALTY_PER_SEMITONE)
         else:
             pitch_score = 0.0  # Can't compare pitch when one is silent
 
         if brightness_valid:
-            # 50% score penalty per octave of brightness difference (symmetric)
-            brightness_score = max(0, 100 - brightness_diff_octaves * 50)
+            brightness_score = max(0, 100 - brightness_diff_octaves * BRIGHTNESS_PENALTY_PER_OCTAVE)
         else:
             brightness_score = 0.0
 
-        loudness_score = max(0, 100 - abs(loudness_diff) * 5)  # 5% per sone
-        flatness_score = max(0, 100 - abs(flatness_diff) * 200)  # flatness is 0-1
+        loudness_score = max(0, 100 - abs(loudness_diff) * LOUDNESS_PENALTY_PER_SONE)
+        flatness_score = max(0, 100 - abs(flatness_diff) * FLATNESS_PENALTY)
 
-        overall_score = (
-            pitch_score * 0.3 +
-            brightness_score * 0.3 +
-            loudness_score * 0.2 +
-            flatness_score * 0.2
-        )
+        # Calculate overall score with normalized weights
+        # Only include valid components in the weighted average
+        components = []
+        if pitch_valid:
+            components.append((pitch_score, 0.3))  # 30% weight
+        if brightness_valid:
+            components.append((brightness_score, 0.3))  # 30% weight
+        components.append((loudness_score, 0.2))  # 20% weight
+        components.append((flatness_score, 0.2))  # 20% weight
+
+        # Normalize weights to sum to 1.0
+        total_weight = sum(weight for _, weight in components)
+        overall_score = sum(score * (weight / total_weight) for score, weight in components)
 
         result = {
             "reference": {
@@ -981,10 +992,14 @@ class SCClient:
             test_params = dict(base)
             test_params[param] = value
 
-            # Play the synth
+            # Record time before playing so we can verify we got fresh data
+            start_time = time.time()
+
+            # Play the synth (continue on failure instead of aborting)
             success, msg = self.play_synth(synthdef, test_params, dur=dur)
             if not success:
-                return False, f"Failed to play synth: {msg}", None
+                results.append({"value": value, "metric": None, "error": f"Synth failed: {msg}"})
+                continue
 
             # Wait for sound to settle
             time.sleep(settle_time)
@@ -993,16 +1008,16 @@ class SCClient:
             with self._analysis_lock:
                 data = self._analysis_data
 
-            # Check for stale or missing data
+            # Check for missing data
             if data is None:
                 results.append({"value": value, "metric": None, "error": "No analysis data"})
-                time.sleep(dur - settle_time + 0.05)
+                time.sleep(dur - settle_time + 0.1)
                 continue
 
-            data_age = time.time() - data.timestamp
-            if data_age > 0.5:  # Data older than 500ms is likely from previous sound
-                results.append({"value": value, "metric": None, "error": f"Stale data ({data_age:.1f}s old)"})
-                time.sleep(dur - settle_time + 0.05)
+            # Check that data is from AFTER synth started (fixes race condition)
+            if data.timestamp < start_time:
+                results.append({"value": value, "metric": None, "error": "No fresh data received"})
+                time.sleep(dur - settle_time + 0.1)
                 continue
 
             # Extract the requested metric
@@ -1015,7 +1030,8 @@ class SCClient:
             elif metric == "flatness":
                 measured = data.flatness
             elif metric == "rms":
-                measured = (data.rms_l + data.rms_r) / 2
+                # Correct RMS averaging: sqrt of mean of squares
+                measured = math.sqrt((data.rms_l**2 + data.rms_r**2) / 2)
             else:
                 measured = 0.0
 
@@ -1024,9 +1040,9 @@ class SCClient:
                 "metric": round(measured, 4),
             })
 
-            # Wait for synth to finish
+            # Wait for synth to finish with larger gap to prevent overlap
             remaining = dur - settle_time
             if remaining > 0:
-                time.sleep(remaining + 0.05)
+                time.sleep(remaining + 0.1)
 
         return True, f"Analyzed {len(results)} values", results

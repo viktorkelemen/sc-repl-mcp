@@ -918,14 +918,16 @@ class TestAnalyzeParameterImpact:
         assert "Analyzer not running" in message
 
     def test_detects_stale_data(self, client, mocker):
-        """Should detect stale analysis data."""
+        """Should detect when analysis data is older than synth start time."""
         client._analyzer_node_id = 1000
         # Mock play_synth to succeed
         mocker.patch.object(client, 'play_synth', return_value=(True, "ok"))
         # Mock sleep to not actually wait
         mocker.patch('time.sleep')
 
-        # Set stale data (1 second old)
+        # Set data with old timestamp (before the synth would start)
+        # The code records start_time = time.time() before play_synth,
+        # so data from before that is considered stale
         client._analysis_data = AnalysisData(
             timestamp=time.time() - 1.0,
             freq=440.0,
@@ -939,32 +941,38 @@ class TestAnalyzeParameterImpact:
         assert success is True
         assert len(results) == 1
         assert results[0]["metric"] is None
-        assert "Stale" in results[0].get("error", "")
+        assert "fresh" in results[0].get("error", "").lower()
 
     def test_extracts_correct_metrics(self, client, mocker):
         """Should extract correct metric values."""
+        import math
         client._analyzer_node_id = 1000
-        mocker.patch.object(client, 'play_synth', return_value=(True, "ok"))
         mocker.patch('time.sleep')
 
-        # Fresh data
-        client._analysis_data = AnalysisData(
-            timestamp=time.time(),
-            freq=440.0,
-            centroid=880.0,
-            loudness_sones=10.0,
-            flatness=0.1,
-            rms_l=0.3,
-            rms_r=0.3,
-        )
+        # Use side_effect to set fresh data when play_synth is called
+        # This ensures data.timestamp > start_time
+        def set_fresh_data(*args, **kwargs):
+            client._analysis_data = AnalysisData(
+                timestamp=time.time(),  # Fresh timestamp after start_time
+                freq=440.0,
+                centroid=880.0,
+                loudness_sones=10.0,
+                flatness=0.1,
+                rms_l=0.3,
+                rms_r=0.3,
+            )
+            return (True, "ok")
+
+        mocker.patch.object(client, 'play_synth', side_effect=set_fresh_data)
 
         # Test each metric type
+        # Note: RMS uses sqrt((0.3² + 0.3²) / 2) = 0.3
         for metric, expected in [
             ("pitch", 440.0),
             ("centroid", 880.0),
             ("loudness", 10.0),
             ("flatness", 0.1),
-            ("rms", 0.3),  # Average of L and R
+            ("rms", math.sqrt((0.3**2 + 0.3**2) / 2)),  # Correct RMS formula
         ]:
             success, _, results = client.analyze_parameter_impact(
                 "test", "freq", [440], metric,
@@ -973,3 +981,128 @@ class TestAnalyzeParameterImpact:
             assert success is True
             assert len(results) == 1
             assert abs(results[0]["metric"] - expected) < 0.01, f"Failed for {metric}"
+
+    def test_continues_on_synth_failure(self, client, mocker):
+        """Should continue collecting results when some synth plays fail."""
+        client._analyzer_node_id = 1000
+        mocker.patch('time.sleep')
+
+        # First call fails, second succeeds
+        call_count = [0]
+
+        def mock_play(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return (False, "SynthDef not found")
+            # Set fresh data for successful call
+            client._analysis_data = AnalysisData(
+                timestamp=time.time(),
+                freq=880.0,
+            )
+            return (True, "ok")
+
+        mocker.patch.object(client, 'play_synth', side_effect=mock_play)
+
+        success, _, results = client.analyze_parameter_impact(
+            "test", "freq", [440, 880], "pitch",
+            dur=0.3, settle_time=0.1
+        )
+
+        assert success is True
+        assert len(results) == 2
+        # First failed
+        assert results[0]["metric"] is None
+        assert "Synth failed" in results[0].get("error", "")
+        # Second succeeded
+        assert results[1]["metric"] is not None
+
+
+class TestReferenceComparisonEdgeCases:
+    """Additional edge case tests for reference comparison."""
+
+    def test_compare_brightness_one_zero_centroid(self, client):
+        """Should handle comparison when only one sound has zero centroid."""
+        client._analyzer_node_id = 1000
+
+        # Capture reference with positive centroid
+        ref_analysis = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=1000.0,
+            flatness=0.1,
+            loudness_sones=5.0,
+        )
+        from sc_repl_mcp.types import ReferenceSnapshot
+        client._references["bright"] = ReferenceSnapshot(
+            name="bright",
+            timestamp=time.time(),
+            analysis=ref_analysis,
+        )
+
+        # Current sound has zero centroid (silent/very dark)
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=0.0,
+            flatness=0.1,
+            loudness_sones=5.0,
+        )
+
+        success, _, data = client.compare_to_reference("bright")
+
+        assert success is True
+        # Brightness should be marked invalid
+        assert data["brightness"]["valid"] is False
+        assert data["brightness"]["ratio"] is None  # or inf
+
+    def test_compare_normalized_weights_when_pitch_invalid(self, client):
+        """Overall score should normalize weights when pitch is invalid."""
+        client._analyzer_node_id = 1000
+
+        # Both sounds silent (freq=0), so pitch is invalid
+        ref_analysis = AnalysisData(
+            timestamp=time.time(),
+            freq=0.0,  # Silent
+            centroid=500.0,
+            flatness=0.1,
+            loudness_sones=5.0,
+        )
+        from sc_repl_mcp.types import ReferenceSnapshot
+        client._references["silent"] = ReferenceSnapshot(
+            name="silent",
+            timestamp=time.time(),
+            analysis=ref_analysis,
+        )
+
+        # Current sound also silent but otherwise identical
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=0.0,
+            centroid=500.0,  # Same brightness
+            flatness=0.1,  # Same character
+            loudness_sones=5.0,  # Same loudness
+        )
+
+        success, _, data = client.compare_to_reference("silent")
+
+        assert success is True
+        assert data["pitch"]["valid"] is False
+        # With normalized weights, identical properties should give high score
+        # Without normalization it would be ~70% (missing 30% from pitch)
+        # With normalization it should be ~100% (weights redistributed)
+        assert data["overall_score"] > 95.0, f"Expected >95%, got {data['overall_score']}"
+
+    def test_capture_reference_stale_data(self, client):
+        """Should fail when trying to capture with stale data."""
+        client._analyzer_node_id = 1000
+
+        # Set stale data (2 seconds old)
+        client._analysis_data = AnalysisData(
+            timestamp=time.time() - 2.0,
+            freq=440.0,
+        )
+
+        success, message = client.capture_reference("test")
+
+        assert success is False
+        assert "stale" in message.lower()
