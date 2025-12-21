@@ -54,8 +54,9 @@ fork {
         rmsL = RunningSum.rms(in[0], 1024);
         rmsR = RunningSum.rms(in[1], 1024);
 
-        // Perceptual loudness (ITU-R BS.1770 standard via Loudness UGen)
+        // Perceptual loudness (Moore-Glasberg model / ISO 532B via Loudness UGen)
         // Returns loudness in sones - more meaningful than RMS for human perception
+        // Note: 2 sones = perceived twice as loud as 1 sone
         loudness = Loudness.kr(fft);
 
         // Onset detection

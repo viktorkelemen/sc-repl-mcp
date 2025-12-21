@@ -379,16 +379,22 @@ def sc_compare_to_reference(name: str) -> str:
     c = data["character"]
     a = data["amplitude"]
 
-    # Format pitch difference
-    if p["diff_semitones"] > 0:
+    # Format pitch difference (handle invalid/silent sounds)
+    if not p.get("valid", True):
+        pitch_desc = "N/A (one or both sounds silent)"
+    elif p["diff_semitones"] > 0:
         pitch_desc = f"+{p['diff_semitones']:.1f} semitones (sharper)"
     elif p["diff_semitones"] < 0:
         pitch_desc = f"{p['diff_semitones']:.1f} semitones (flatter)"
     else:
         pitch_desc = "matched"
 
-    # Format brightness
-    if b["ratio"] > 1.1:
+    # Format brightness (handle invalid/silent sounds)
+    if not b.get("valid", True):
+        bright_desc = "N/A (one sound has no spectral content)"
+    elif b["ratio"] is None:
+        bright_desc = "N/A"
+    elif b["ratio"] > 1.1:
         bright_desc = f"{(b['ratio']-1)*100:.0f}% brighter"
     elif b["ratio"] < 0.9:
         bright_desc = f"{(1-b['ratio'])*100:.0f}% darker"
@@ -437,7 +443,7 @@ def sc_compare_to_reference(name: str) -> str:
     ]
 
     # Filter out empty lines from missing description
-    lines = [l for l in lines if l != ""]
+    lines = [ln for ln in lines if ln != ""]
 
     return "\n".join(lines)
 

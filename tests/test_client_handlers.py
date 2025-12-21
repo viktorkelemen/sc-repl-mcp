@@ -795,3 +795,181 @@ class TestReferenceComparison:
         success, _, data = client.compare_to_reference("target")
         assert 0 <= data["overall_score"] <= 100
         assert data["overall_score"] > 90  # Nearly identical
+
+    def test_compare_silent_sounds_pitch_invalid(self, client):
+        """Pitch should be marked invalid when one sound is silent."""
+        client._analyzer_node_id = 1000
+
+        # Reference with sound
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=880.0,
+        )
+        client.capture_reference("target")
+
+        # Current sound is silent (freq=0)
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=0.0,  # Silent
+            centroid=0.0,
+        )
+
+        success, _, data = client.compare_to_reference("target")
+        assert success is True
+        assert data["pitch"]["valid"] is False
+        assert data["pitch"]["score"] == 0.0
+
+    def test_compare_brightness_symmetric_scoring(self, client):
+        """Brightness scoring should be symmetric (2x brighter = 0.5x darker in penalty)."""
+        client._analyzer_node_id = 1000
+
+        # Reference
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=1000.0,  # Reference centroid
+        )
+        client.capture_reference("target")
+
+        # 2x brighter
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=2000.0,  # 2x brighter
+        )
+        _, _, data_brighter = client.compare_to_reference("target")
+
+        # 0.5x darker (should have same score penalty)
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=500.0,  # 0.5x darker
+        )
+        _, _, data_darker = client.compare_to_reference("target")
+
+        # Scores should be equal (symmetric)
+        assert abs(data_brighter["brightness"]["score"] - data_darker["brightness"]["score"]) < 1.0
+
+    def test_compare_zero_centroid_both_silent(self, client):
+        """Both sounds with zero centroid should match."""
+        client._analyzer_node_id = 1000
+
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=0.0,
+            centroid=0.0,
+        )
+        client.capture_reference("target")
+
+        success, _, data = client.compare_to_reference("target")
+        assert success is True
+        assert data["brightness"]["valid"] is True
+        assert data["brightness"]["score"] == 100.0
+
+
+class TestAnalyzeParameterImpact:
+    """Tests for analyze_parameter_impact method."""
+
+    def test_validates_empty_values(self, client):
+        """Should reject empty values list."""
+        client._analyzer_node_id = 1000
+
+        success, message, _ = client.analyze_parameter_impact(
+            "test", "freq", [], "pitch"
+        )
+
+        assert success is False
+        assert "No values" in message
+
+    def test_validates_unknown_metric(self, client):
+        """Should reject unknown metric."""
+        client._analyzer_node_id = 1000
+
+        success, message, _ = client.analyze_parameter_impact(
+            "test", "freq", [440], "unknown_metric"
+        )
+
+        assert success is False
+        assert "Unknown metric" in message
+
+    def test_validates_settle_time_less_than_dur(self, client):
+        """Should reject settle_time >= dur."""
+        client._analyzer_node_id = 1000
+
+        success, message, _ = client.analyze_parameter_impact(
+            "test", "freq", [440], "pitch",
+            dur=0.3, settle_time=0.5  # Invalid: settle_time > dur
+        )
+
+        assert success is False
+        assert "settle_time" in message
+        assert "must be less than" in message
+
+    def test_requires_analyzer_running(self, client):
+        """Should fail if analyzer not running."""
+        client._analyzer_node_id = None
+
+        success, message, _ = client.analyze_parameter_impact(
+            "test", "freq", [440], "pitch"
+        )
+
+        assert success is False
+        assert "Analyzer not running" in message
+
+    def test_detects_stale_data(self, client, mocker):
+        """Should detect stale analysis data."""
+        client._analyzer_node_id = 1000
+        # Mock play_synth to succeed
+        mocker.patch.object(client, 'play_synth', return_value=(True, "ok"))
+        # Mock sleep to not actually wait
+        mocker.patch('time.sleep')
+
+        # Set stale data (1 second old)
+        client._analysis_data = AnalysisData(
+            timestamp=time.time() - 1.0,
+            freq=440.0,
+        )
+
+        success, message, results = client.analyze_parameter_impact(
+            "test", "freq", [440], "pitch",
+            dur=0.3, settle_time=0.1
+        )
+
+        assert success is True
+        assert len(results) == 1
+        assert results[0]["metric"] is None
+        assert "Stale" in results[0].get("error", "")
+
+    def test_extracts_correct_metrics(self, client, mocker):
+        """Should extract correct metric values."""
+        client._analyzer_node_id = 1000
+        mocker.patch.object(client, 'play_synth', return_value=(True, "ok"))
+        mocker.patch('time.sleep')
+
+        # Fresh data
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=880.0,
+            loudness_sones=10.0,
+            flatness=0.1,
+            rms_l=0.3,
+            rms_r=0.3,
+        )
+
+        # Test each metric type
+        for metric, expected in [
+            ("pitch", 440.0),
+            ("centroid", 880.0),
+            ("loudness", 10.0),
+            ("flatness", 0.1),
+            ("rms", 0.3),  # Average of L and R
+        ]:
+            success, _, results = client.analyze_parameter_impact(
+                "test", "freq", [440], metric,
+                dur=0.3, settle_time=0.1
+            )
+            assert success is True
+            assert len(results) == 1
+            assert abs(results[0]["metric"] - expected) < 0.01, f"Failed for {metric}"

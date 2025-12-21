@@ -829,34 +829,58 @@ class SCClient:
         ref_analysis = ref.analysis
 
         # Calculate pitch difference in semitones
+        # Handle silent sounds (freq=0) explicitly
+        import math
         if current.freq > 0 and ref_analysis.freq > 0:
-            import math
             pitch_diff_semitones = 12 * math.log2(current.freq / ref_analysis.freq)
+            pitch_valid = True
         else:
             pitch_diff_semitones = 0.0
+            pitch_valid = False  # One or both sounds are silent
 
         # Calculate centroid ratio (brightness comparison)
-        if ref_analysis.centroid > 0:
+        # Use log scale for symmetric scoring (2x brighter = 0.5x darker in score impact)
+        if current.centroid > 0 and ref_analysis.centroid > 0:
             brightness_ratio = current.centroid / ref_analysis.centroid
-        else:
+            # Log scale: ratio of 2.0 or 0.5 both give same score penalty
+            brightness_diff_octaves = abs(math.log2(brightness_ratio))
+            brightness_valid = True
+        elif current.centroid == 0 and ref_analysis.centroid == 0:
             brightness_ratio = 1.0
+            brightness_diff_octaves = 0.0
+            brightness_valid = True  # Both silent/dark
+        else:
+            brightness_ratio = 0.0 if current.centroid == 0 else float('inf')
+            brightness_diff_octaves = 10.0  # Large penalty for mismatch
+            brightness_valid = False
 
         # Calculate loudness difference
         loudness_diff = current.loudness_sones - ref_analysis.loudness_sones
 
-        # Calculate RMS difference in dB
-        if ref_analysis.rms_l > 0:
+        # Calculate RMS difference in dB (handle zero values)
+        if current.rms_l > 0 and ref_analysis.rms_l > 0:
             rms_db_diff = amp_to_db(current.rms_l) - amp_to_db(ref_analysis.rms_l)
+        elif current.rms_l == 0 and ref_analysis.rms_l == 0:
+            rms_db_diff = 0.0  # Both silent
         else:
-            rms_db_diff = 0.0
+            rms_db_diff = -60.0 if current.rms_l == 0 else 60.0  # One silent
 
         # Flatness difference (tonal vs noise character)
         flatness_diff = current.flatness - ref_analysis.flatness
 
         # Calculate overall similarity score (0-100%)
         # Weight different aspects
-        pitch_score = max(0, 100 - abs(pitch_diff_semitones) * 10)  # 10% per semitone
-        brightness_score = max(0, 100 - abs(brightness_ratio - 1.0) * 100)  # 1% per 1% ratio diff
+        if pitch_valid:
+            pitch_score = max(0, 100 - abs(pitch_diff_semitones) * 10)  # 10% per semitone
+        else:
+            pitch_score = 0.0  # Can't compare pitch when one is silent
+
+        if brightness_valid:
+            # 50% score penalty per octave of brightness difference (symmetric)
+            brightness_score = max(0, 100 - brightness_diff_octaves * 50)
+        else:
+            brightness_score = 0.0
+
         loudness_score = max(0, 100 - abs(loudness_diff) * 5)  # 5% per sone
         flatness_score = max(0, 100 - abs(flatness_diff) * 200)  # flatness is 0-1
 
@@ -878,12 +902,14 @@ class SCClient:
                 "reference_freq": round(ref_analysis.freq, 2),
                 "diff_semitones": round(pitch_diff_semitones, 2),
                 "score": round(pitch_score, 1),
+                "valid": pitch_valid,
             },
             "brightness": {
                 "current_centroid": round(current.centroid, 1),
                 "reference_centroid": round(ref_analysis.centroid, 1),
-                "ratio": round(brightness_ratio, 2),
+                "ratio": round(brightness_ratio, 2) if brightness_valid else None,
                 "score": round(brightness_score, 1),
+                "valid": brightness_valid,
             },
             "loudness": {
                 "current_sones": round(current.loudness_sones, 2),
@@ -913,7 +939,7 @@ class SCClient:
         param: str,
         values: list[float],
         metric: str,
-        base_params: Optional[dict] = None,
+        base_params: Optional[dict[str, Any]] = None,
         dur: float = 0.3,
         settle_time: float = 0.15,
     ) -> tuple[bool, str, Optional[list[dict]]]:
@@ -928,17 +954,21 @@ class SCClient:
             metric: Metric to measure ("pitch", "centroid", "loudness", "flatness", "rms")
             base_params: Other fixed parameters for the synth
             dur: Duration to play each test tone (default 0.3s)
-            settle_time: Time to wait before measuring (default 0.15s)
+            settle_time: Time to wait before measuring (default 0.15s). Must be < dur.
 
         Returns:
             (success, message, results_list) where each result contains
-            the parameter value and measured metric
+            the parameter value and measured metric. Results may include
+            an "error" key if measurement failed for that value.
         """
         if not values:
             return False, "No values provided to test", None
 
         if metric not in ("pitch", "centroid", "loudness", "flatness", "rms"):
             return False, f"Unknown metric '{metric}'. Use: pitch, centroid, loudness, flatness, rms", None
+
+        if settle_time >= dur:
+            return False, f"settle_time ({settle_time}s) must be less than dur ({dur}s)", None
 
         if self._analyzer_node_id is None:
             return False, "Analyzer not running. Call sc_start_analyzer first.", None
@@ -963,8 +993,15 @@ class SCClient:
             with self._analysis_lock:
                 data = self._analysis_data
 
+            # Check for stale or missing data
             if data is None:
                 results.append({"value": value, "metric": None, "error": "No analysis data"})
+                time.sleep(dur - settle_time + 0.05)
+                continue
+
+            data_age = time.time() - data.timestamp
+            if data_age > 0.5:  # Data older than 500ms is likely from previous sound
+                results.append({"value": value, "metric": None, "error": f"Stale data ({data_age:.1f}s old)"})
                 time.sleep(dur - settle_time + 0.05)
                 continue
 
