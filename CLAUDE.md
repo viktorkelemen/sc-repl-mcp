@@ -9,6 +9,19 @@ This MCP server enables Claude to control SuperCollider for sound synthesis and 
 3. **Analyze**: `sc_start_analyzer` then `sc_get_analysis` to monitor audio
 4. **Debug**: `sc_get_logs` to see server messages and errors
 
+## SuperCollider Verification
+
+When writing SynthDefs or SC code, ALWAYS use WebSearch to verify:
+- UGen argument names and order (they vary between UGens)
+- Envelope specifications (Env.perc, Env.adsr, etc.)
+- Filter/oscillator parameter ranges and defaults
+- Trigger vs. gate behavior
+- Any UGen you haven't used recently
+
+Search with: `site:doc.sccode.org [UGen name]` to confirm syntax before writing code.
+
+Do NOT rely on memory for SC specifics - the API has many subtle variations that are easy to get wrong.
+
 ## Tool Reference
 
 ### Basic Tools
