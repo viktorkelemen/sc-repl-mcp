@@ -1,6 +1,7 @@
 """Data types for SC-REPL MCP Server."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -40,6 +41,8 @@ class AnalysisData:
     peak_r: float = 0.0
     rms_l: float = 0.0
     rms_r: float = 0.0
+    # Perceptual loudness (ITU-R BS.1770)
+    loudness_sones: float = 0.0  # perceptual loudness in sones
 
 
 @dataclass
@@ -57,3 +60,17 @@ class SpectrumData:
     # Band powers (logarithmic spacing from ~60Hz to ~16kHz)
     # Frequencies: 60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000 Hz
     bands: tuple = (0.0,) * 14  # 14 bands
+
+
+@dataclass
+class ReferenceSnapshot:
+    """A captured reference sound for comparison.
+
+    Used for sound matching workflows - capture a target sound's analysis
+    and compare subsequent sounds against it.
+    """
+    name: str
+    timestamp: float
+    analysis: AnalysisData
+    spectrum: Optional[SpectrumData] = None
+    description: str = ""

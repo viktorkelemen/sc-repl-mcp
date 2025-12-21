@@ -1,5 +1,6 @@
 """SuperCollider OSC client for SC-REPL MCP Server."""
 
+import math
 import os
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from .config import (
     SCLANG_INIT_CODE,
     SPECTRUM_BAND_FREQUENCIES,
 )
-from .types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData
+from .types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData, ReferenceSnapshot
 from .utils import freq_to_note, amp_to_db, kill_process_on_port
 from .sclang import find_sclang
 
@@ -54,6 +55,10 @@ class SCClient:
         # Spectrum analyzer state
         self._spectrum_data: Optional[SpectrumData] = None
         self._spectrum_lock = threading.Lock()
+
+        # Reference snapshots for sound matching
+        self._references: dict[str, ReferenceSnapshot] = {}
+        self._reference_lock = threading.Lock()
 
         # Persistent sclang process for SynthDefs and OSC forwarding
         self._sclang_process: Optional[subprocess.Popen] = None
@@ -129,10 +134,14 @@ class SCClient:
     def _handle_analysis(self, address: str, *args):
         """Handle /mcp/analysis messages from the analyzer synth.
 
-        Expected args: [node_id, reply_id, freq, has_freq, centroid, flatness, rolloff, peak_l, peak_r, rms_l, rms_r]
+        Expected args: [node_id, reply_id, freq, has_freq, centroid, flatness, rolloff, peak_l, peak_r, rms_l, rms_r, loudness]
+        Note: loudness field (index 11) was added later - handle gracefully if missing.
         """
         if len(args) < 11:
             return
+
+        # Extract loudness if present (backward compatible)
+        loudness = float(args[11]) if len(args) >= 12 else 0.0
 
         data = AnalysisData(
             timestamp=time.time(),
@@ -145,6 +154,7 @@ class SCClient:
             peak_r=float(args[8]),
             rms_l=float(args[9]),
             rms_r=float(args[10]),
+            loudness_sones=loudness,
         )
         with self._analysis_lock:
             self._analysis_data = data
@@ -595,6 +605,9 @@ class SCClient:
                 "db_l": round(amp_to_db(data.rms_l), 1),
                 "db_r": round(amp_to_db(data.rms_r), 1),
             },
+            "loudness": {
+                "sones": round(data.loudness_sones, 2),
+            },
             "is_silent": is_silent,
             "is_clipping": data.peak_l > 1.0 or data.peak_r > 1.0,
         }
@@ -695,3 +708,341 @@ class SCClient:
         """Clear the log buffer."""
         with self._log_lock:
             self._log_buffer.clear()
+
+    # Reference capture and comparison methods
+
+    def capture_reference(self, name: str, description: str = "") -> tuple[bool, str]:
+        """Capture current analysis and spectrum as a named reference.
+
+        Args:
+            name: Unique name for this reference
+            description: Optional description of the sound
+
+        Returns:
+            (success, message) tuple
+        """
+        if not name or not isinstance(name, str):
+            return False, "Reference name is required"
+
+        if self._analyzer_node_id is None:
+            return False, "Analyzer not running. Call sc_start_analyzer first."
+
+        # Get current analysis data
+        with self._analysis_lock:
+            analysis = self._analysis_data
+
+        if analysis is None:
+            return False, "No analysis data available"
+
+        # Check if data is stale
+        age = time.time() - analysis.timestamp
+        if age > 1.0:
+            return False, f"Analysis data is stale ({age:.1f}s old). Make sure sound is playing."
+
+        # Get current spectrum data
+        with self._spectrum_lock:
+            spectrum = self._spectrum_data
+
+        # Create snapshot
+        snapshot = ReferenceSnapshot(
+            name=name,
+            timestamp=time.time(),
+            analysis=analysis,
+            spectrum=spectrum,
+            description=description,
+        )
+
+        # Store reference
+        with self._reference_lock:
+            overwriting = name in self._references
+            self._references[name] = snapshot
+
+        if overwriting:
+            return True, f"Reference '{name}' updated"
+        return True, f"Reference '{name}' captured"
+
+    def get_reference(self, name: str) -> Optional[ReferenceSnapshot]:
+        """Get a stored reference by name.
+
+        Args:
+            name: Name of the reference to retrieve
+
+        Returns:
+            ReferenceSnapshot if found, None otherwise
+        """
+        with self._reference_lock:
+            return self._references.get(name)
+
+    def list_references(self) -> list[ReferenceSnapshot]:
+        """List all stored references.
+
+        Returns:
+            List of ReferenceSnapshot objects, sorted by timestamp
+        """
+        with self._reference_lock:
+            refs = list(self._references.values())
+        return sorted(refs, key=lambda r: r.timestamp)
+
+    def delete_reference(self, name: str) -> tuple[bool, str]:
+        """Delete a stored reference.
+
+        Args:
+            name: Name of the reference to delete
+
+        Returns:
+            (success, message) tuple
+        """
+        with self._reference_lock:
+            if name not in self._references:
+                return False, f"Reference '{name}' not found"
+            del self._references[name]
+        return True, f"Reference '{name}' deleted"
+
+    def compare_to_reference(self, name: str) -> tuple[bool, str, Optional[dict]]:
+        """Compare current sound to a stored reference.
+
+        Args:
+            name: Name of the reference to compare against
+
+        Returns:
+            (success, message, comparison_dict) tuple
+        """
+        # Get reference
+        ref = self.get_reference(name)
+        if ref is None:
+            return False, f"Reference '{name}' not found", None
+
+        # Get current analysis
+        if self._analyzer_node_id is None:
+            return False, "Analyzer not running. Call sc_start_analyzer first.", None
+
+        with self._analysis_lock:
+            current = self._analysis_data
+
+        if current is None:
+            return False, "No current analysis data available", None
+
+        # Check if current data is stale
+        age = time.time() - current.timestamp
+        if age > 1.0:
+            return False, f"Current analysis data is stale ({age:.1f}s old)", None
+
+        ref_analysis = ref.analysis
+
+        # Calculate pitch difference in semitones
+        # Handle silent sounds (freq=0) explicitly
+        if current.freq > 0 and ref_analysis.freq > 0:
+            pitch_diff_semitones = 12 * math.log2(current.freq / ref_analysis.freq)
+            pitch_valid = True
+        else:
+            pitch_diff_semitones = 0.0
+            pitch_valid = False  # One or both sounds are silent
+
+        # Calculate centroid ratio (brightness comparison)
+        # Use log scale for symmetric scoring (2x brighter = 0.5x darker in score impact)
+        if current.centroid > 0 and ref_analysis.centroid > 0:
+            brightness_ratio = current.centroid / ref_analysis.centroid
+            # Log scale: ratio of 2.0 or 0.5 both give same score penalty
+            brightness_diff_octaves = abs(math.log2(brightness_ratio))
+            brightness_valid = True
+        elif current.centroid == 0 and ref_analysis.centroid == 0:
+            brightness_ratio = 1.0
+            brightness_diff_octaves = 0.0
+            brightness_valid = True  # Both silent/dark
+        else:
+            brightness_ratio = 0.0 if current.centroid == 0 else float('inf')
+            brightness_diff_octaves = 10.0  # Large penalty for mismatch
+            brightness_valid = False
+
+        # Calculate loudness difference
+        loudness_diff = current.loudness_sones - ref_analysis.loudness_sones
+
+        # Calculate RMS difference in dB (handle zero values)
+        if current.rms_l > 0 and ref_analysis.rms_l > 0:
+            rms_db_diff = amp_to_db(current.rms_l) - amp_to_db(ref_analysis.rms_l)
+        elif current.rms_l == 0 and ref_analysis.rms_l == 0:
+            rms_db_diff = 0.0  # Both silent
+        else:
+            rms_db_diff = -60.0 if current.rms_l == 0 else 60.0  # One silent
+
+        # Flatness difference (tonal vs noise character)
+        flatness_diff = current.flatness - ref_analysis.flatness
+
+        # Calculate individual component scores (0-100%)
+        # Scoring penalties per unit difference
+        PITCH_PENALTY_PER_SEMITONE = 10  # 10% per semitone
+        BRIGHTNESS_PENALTY_PER_OCTAVE = 50  # 50% per octave
+        LOUDNESS_PENALTY_PER_SONE = 5  # 5% per sone
+        FLATNESS_PENALTY = 200  # flatness is 0-1
+
+        if pitch_valid:
+            pitch_score = max(0, 100 - abs(pitch_diff_semitones) * PITCH_PENALTY_PER_SEMITONE)
+        else:
+            pitch_score = 0.0  # Can't compare pitch when one is silent
+
+        if brightness_valid:
+            brightness_score = max(0, 100 - brightness_diff_octaves * BRIGHTNESS_PENALTY_PER_OCTAVE)
+        else:
+            brightness_score = 0.0
+
+        loudness_score = max(0, 100 - abs(loudness_diff) * LOUDNESS_PENALTY_PER_SONE)
+        flatness_score = max(0, 100 - abs(flatness_diff) * FLATNESS_PENALTY)
+
+        # Calculate overall score with normalized weights
+        # Only include valid components in the weighted average
+        components = []
+        if pitch_valid:
+            components.append((pitch_score, 0.3))  # 30% weight
+        if brightness_valid:
+            components.append((brightness_score, 0.3))  # 30% weight
+        components.append((loudness_score, 0.2))  # 20% weight
+        components.append((flatness_score, 0.2))  # 20% weight
+
+        # Normalize weights to sum to 1.0
+        total_weight = sum(weight for _, weight in components)
+        overall_score = sum(score * (weight / total_weight) for score, weight in components)
+
+        result = {
+            "reference": {
+                "name": ref.name,
+                "description": ref.description,
+                "captured_at": ref.timestamp,
+            },
+            "pitch": {
+                "current_freq": round(current.freq, 2),
+                "reference_freq": round(ref_analysis.freq, 2),
+                "diff_semitones": round(pitch_diff_semitones, 2),
+                "score": round(pitch_score, 1),
+                "valid": pitch_valid,
+            },
+            "brightness": {
+                "current_centroid": round(current.centroid, 1),
+                "reference_centroid": round(ref_analysis.centroid, 1),
+                "ratio": round(brightness_ratio, 2) if brightness_valid else None,
+                "score": round(brightness_score, 1),
+                "valid": brightness_valid,
+            },
+            "loudness": {
+                "current_sones": round(current.loudness_sones, 2),
+                "reference_sones": round(ref_analysis.loudness_sones, 2),
+                "diff_sones": round(loudness_diff, 2),
+                "score": round(loudness_score, 1),
+            },
+            "character": {
+                "current_flatness": round(current.flatness, 3),
+                "reference_flatness": round(ref_analysis.flatness, 3),
+                "diff": round(flatness_diff, 3),
+                "score": round(flatness_score, 1),
+            },
+            "amplitude": {
+                "current_db": round(amp_to_db(current.rms_l), 1),
+                "reference_db": round(amp_to_db(ref_analysis.rms_l), 1),
+                "diff_db": round(rms_db_diff, 1),
+            },
+            "overall_score": round(overall_score, 1),
+        }
+
+        return True, "Comparison complete", result
+
+    def analyze_parameter_impact(
+        self,
+        synthdef: str,
+        param: str,
+        values: list[float],
+        metric: str,
+        base_params: Optional[dict[str, Any]] = None,
+        dur: float = 0.3,
+        settle_time: float = 0.15,
+    ) -> tuple[bool, str, Optional[list[dict]]]:
+        """Analyze how a parameter affects a specific metric.
+
+        Plays the synth with different parameter values and measures the result.
+
+        Args:
+            synthdef: Name of the SynthDef to test
+            param: Parameter name to sweep (e.g., "freq", "cutoff")
+            values: List of values to test
+            metric: Metric to measure ("pitch", "centroid", "loudness", "flatness", "rms")
+            base_params: Other fixed parameters for the synth
+            dur: Duration to play each test tone (default 0.3s)
+            settle_time: Time to wait before measuring (default 0.15s). Must be < dur.
+
+        Returns:
+            (success, message, results_list) where each result contains
+            the parameter value and measured metric. Results may include
+            an "error" key if measurement failed for that value.
+        """
+        if not values:
+            return False, "No values provided to test", None
+
+        if metric not in ("pitch", "centroid", "loudness", "flatness", "rms"):
+            return False, f"Unknown metric '{metric}'. Use: pitch, centroid, loudness, flatness, rms", None
+
+        if settle_time >= dur:
+            return False, f"settle_time ({settle_time}s) must be less than dur ({dur}s)", None
+
+        if self._analyzer_node_id is None:
+            return False, "Analyzer not running. Call sc_start_analyzer first.", None
+
+        results = []
+        base = base_params or {}
+
+        for value in values:
+            # Build params with the test value
+            test_params = dict(base)
+            test_params[param] = value
+
+            # Record time before playing so we can verify we got fresh data
+            start_time = time.time()
+
+            # Play the synth (continue on failure instead of aborting)
+            success, msg = self.play_synth(synthdef, test_params, dur=dur)
+            if not success:
+                results.append({"value": value, "metric": None, "error": f"Synth failed: {msg}"})
+                continue
+
+            # Wait for sound to settle
+            time.sleep(settle_time)
+
+            # Measure the metric
+            with self._analysis_lock:
+                data = self._analysis_data
+
+            # Check for missing data
+            if data is None:
+                results.append({"value": value, "metric": None, "error": "No analysis data"})
+                time.sleep(dur - settle_time + 0.1)
+                continue
+
+            # Check that data is from AFTER synth started (fixes race condition)
+            if data.timestamp < start_time:
+                results.append({"value": value, "metric": None, "error": "No fresh data received"})
+                time.sleep(dur - settle_time + 0.1)
+                continue
+
+            # Extract the requested metric
+            if metric == "pitch":
+                measured = data.freq
+            elif metric == "centroid":
+                measured = data.centroid
+            elif metric == "loudness":
+                measured = data.loudness_sones
+            elif metric == "flatness":
+                measured = data.flatness
+            elif metric == "rms":
+                # Correct RMS averaging: sqrt of mean of squares
+                measured = math.sqrt((data.rms_l**2 + data.rms_r**2) / 2)
+            else:
+                measured = 0.0
+
+            results.append({
+                "value": value,
+                "metric": round(measured, 4),
+            })
+
+            # Wait for synth to finish with larger gap to prevent overlap
+            remaining = dur - settle_time
+            if remaining > 0:
+                time.sleep(remaining + 0.1)
+
+        return True, f"Analyzed {len(results)} values", results

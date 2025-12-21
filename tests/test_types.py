@@ -2,7 +2,7 @@
 
 import pytest
 
-from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData
+from sc_repl_mcp.types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData, ReferenceSnapshot
 
 
 class TestLogEntry:
@@ -78,6 +78,7 @@ class TestAnalysisData:
         assert data.peak_r == 0.0
         assert data.rms_l == 0.0
         assert data.rms_r == 0.0
+        assert data.loudness_sones == 0.0
 
     def test_create_with_pitch_data(self):
         data = AnalysisData(
@@ -103,6 +104,7 @@ class TestAnalysisData:
             peak_r=0.75,
             rms_l=0.3,
             rms_r=0.28,
+            loudness_sones=12.5,
         )
         assert data.freq == 440.0
         assert data.centroid == 880.0
@@ -112,6 +114,7 @@ class TestAnalysisData:
         assert data.peak_r == 0.75
         assert data.rms_l == 0.3
         assert data.rms_r == 0.28
+        assert data.loudness_sones == 12.5
 
 
 class TestOnsetEvent:
@@ -170,3 +173,49 @@ class TestSpectrumData:
         data = SpectrumData(timestamp=100.0)
         assert data.timestamp == 100.0
         assert data.bands == (0.0,) * 14  # Still default
+
+
+class TestReferenceSnapshot:
+    """Tests for ReferenceSnapshot dataclass."""
+
+    def test_create_with_required_fields(self):
+        analysis = AnalysisData(freq=440.0, centroid=880.0, loudness_sones=10.0)
+        ref = ReferenceSnapshot(
+            name="test_ref",
+            timestamp=1234567890.0,
+            analysis=analysis,
+        )
+        assert ref.name == "test_ref"
+        assert ref.timestamp == 1234567890.0
+        assert ref.analysis == analysis
+        assert ref.spectrum is None  # Default
+        assert ref.description == ""  # Default
+
+    def test_create_with_all_fields(self):
+        analysis = AnalysisData(freq=440.0, centroid=880.0)
+        spectrum = SpectrumData(timestamp=1234567890.0)
+        ref = ReferenceSnapshot(
+            name="my_bell",
+            timestamp=1234567890.0,
+            analysis=analysis,
+            spectrum=spectrum,
+            description="Bright metallic bell sound",
+        )
+        assert ref.name == "my_bell"
+        assert ref.analysis == analysis
+        assert ref.spectrum == spectrum
+        assert ref.description == "Bright metallic bell sound"
+
+    def test_analysis_contains_loudness(self):
+        """ReferenceSnapshot should store analysis with loudness_sones."""
+        analysis = AnalysisData(
+            freq=440.0,
+            centroid=880.0,
+            loudness_sones=15.5,
+        )
+        ref = ReferenceSnapshot(
+            name="test",
+            timestamp=100.0,
+            analysis=analysis,
+        )
+        assert ref.analysis.loudness_sones == 15.5
