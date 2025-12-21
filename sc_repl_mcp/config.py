@@ -26,12 +26,13 @@ fork {
 
     // MCP Audio Analyzer SynthDefs
 
-    // Full audio analyzer - pitch, timbre, amplitude, onset, spectrum
+    // Full audio analyzer - pitch, timbre, amplitude, loudness, onset, spectrum
     SynthDef(\mcp_analyzer, {
         arg bus = 0, replyRate = 10, replyID = 1001;
         var in, mono, fft;
         var freq, hasFreq, centroid, flatness, rolloff;
         var peakL, peakR, rmsL, rmsR;
+        var loudness;  // perceptual loudness in sones
         var onsetTrig;
         var spectrumBands;
 
@@ -53,6 +54,10 @@ fork {
         rmsL = RunningSum.rms(in[0], 1024);
         rmsR = RunningSum.rms(in[1], 1024);
 
+        // Perceptual loudness (ITU-R BS.1770 standard via Loudness UGen)
+        // Returns loudness in sones - more meaningful than RMS for human perception
+        loudness = Loudness.kr(fft);
+
         // Onset detection
         onsetTrig = Onsets.kr(fft, threshold: 0.3, odftype: \rcomplex);
 
@@ -63,7 +68,7 @@ fork {
         SendReply.kr(
             Impulse.kr(replyRate),
             '/mcp/analysis',
-            [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR],
+            [freq, hasFreq, centroid, flatness, rolloff, peakL, peakR, rmsL, rmsR, loudness],
             replyID
         );
 

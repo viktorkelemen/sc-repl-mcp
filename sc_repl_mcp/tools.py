@@ -95,6 +95,7 @@ def sc_get_analysis() -> str:
     p = data["pitch"]
     t = data["timbre"]
     a = data["amplitude"]
+    l = data["loudness"]
 
     lines = [
         "Audio Analysis:",
@@ -111,6 +112,8 @@ def sc_get_analysis() -> str:
         f"  Peak: L={a['peak_l']:.4f} R={a['peak_r']:.4f}",
         f"  RMS:  L={a['rms_l']:.4f} R={a['rms_r']:.4f}",
         f"  dB:   L={a['db_l']:.1f} R={a['db_r']:.1f}",
+        "",
+        f"Loudness: {l['sones']:.1f} sones (perceptual)",
         "",
         f"Silent: {data['is_silent']}",
         f"Clipping: {data['is_clipping']}",
@@ -322,3 +325,240 @@ def sc_clear_logs() -> str:
     """Clear the server log buffer."""
     sc_client.clear_logs()
     return "Log buffer cleared"
+
+
+# Reference capture and comparison tools for sound matching
+
+@mcp.tool()
+def sc_capture_reference(name: str, description: str = "") -> str:
+    """Capture the current sound as a named reference for later comparison.
+
+    This captures the current analysis data (pitch, timbre, loudness, spectrum)
+    as a snapshot that can be compared against later. Essential for sound matching
+    workflows where you want to recreate a target sound.
+
+    Args:
+        name: Unique name for this reference (e.g., "target_bell", "warm_pad")
+        description: Optional description of the sound characteristics
+
+    Example workflow:
+        1. Play your target sound
+        2. sc_capture_reference("target", "bright metallic bell")
+        3. Adjust your synth parameters
+        4. sc_compare_to_reference("target") to see how close you are
+    """
+    _, message = sc_client.capture_reference(name=name, description=description)
+    return message
+
+
+@mcp.tool()
+def sc_compare_to_reference(name: str) -> str:
+    """Compare the current sound to a stored reference.
+
+    Returns detailed comparison showing differences in pitch, brightness,
+    loudness, and tonal character, plus an overall similarity score.
+
+    Args:
+        name: Name of the reference to compare against
+
+    Returns comparison with:
+        - Pitch difference in semitones
+        - Brightness ratio (centroid comparison)
+        - Loudness difference in sones
+        - Character difference (tonal vs noise)
+        - Overall similarity score (0-100%)
+    """
+    success, message, data = sc_client.compare_to_reference(name)
+    if not success:
+        return message
+
+    ref = data["reference"]
+    p = data["pitch"]
+    b = data["brightness"]
+    l = data["loudness"]
+    c = data["character"]
+    a = data["amplitude"]
+
+    # Format pitch difference
+    if p["diff_semitones"] > 0:
+        pitch_desc = f"+{p['diff_semitones']:.1f} semitones (sharper)"
+    elif p["diff_semitones"] < 0:
+        pitch_desc = f"{p['diff_semitones']:.1f} semitones (flatter)"
+    else:
+        pitch_desc = "matched"
+
+    # Format brightness
+    if b["ratio"] > 1.1:
+        bright_desc = f"{(b['ratio']-1)*100:.0f}% brighter"
+    elif b["ratio"] < 0.9:
+        bright_desc = f"{(1-b['ratio'])*100:.0f}% darker"
+    else:
+        bright_desc = "matched"
+
+    # Format loudness
+    if l["diff_sones"] > 0.5:
+        loud_desc = f"+{l['diff_sones']:.1f} sones (louder)"
+    elif l["diff_sones"] < -0.5:
+        loud_desc = f"{l['diff_sones']:.1f} sones (quieter)"
+    else:
+        loud_desc = "matched"
+
+    # Format character
+    if c["diff"] > 0.1:
+        char_desc = "more noise-like"
+    elif c["diff"] < -0.1:
+        char_desc = "more tonal"
+    else:
+        char_desc = "matched"
+
+    lines = [
+        f"Comparison to '{ref['name']}':",
+        f"  {ref['description']}" if ref['description'] else "",
+        "",
+        f"Overall Match: {data['overall_score']:.0f}%",
+        "",
+        f"Pitch: {pitch_desc}",
+        f"  Current: {p['current_freq']:.0f} Hz, Reference: {p['reference_freq']:.0f} Hz",
+        f"  Score: {p['score']:.0f}%",
+        "",
+        f"Brightness: {bright_desc}",
+        f"  Current centroid: {b['current_centroid']:.0f} Hz, Reference: {b['reference_centroid']:.0f} Hz",
+        f"  Score: {b['score']:.0f}%",
+        "",
+        f"Loudness: {loud_desc}",
+        f"  Current: {l['current_sones']:.1f} sones, Reference: {l['reference_sones']:.1f} sones",
+        f"  Score: {l['score']:.0f}%",
+        "",
+        f"Character: {char_desc}",
+        f"  Current flatness: {c['current_flatness']:.3f}, Reference: {c['reference_flatness']:.3f}",
+        f"  Score: {c['score']:.0f}%",
+        "",
+        f"Amplitude: {a['diff_db']:+.1f} dB difference",
+    ]
+
+    # Filter out empty lines from missing description
+    lines = [l for l in lines if l != ""]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def sc_list_references() -> str:
+    """List all captured sound references.
+
+    Shows all references available for comparison, with their capture time
+    and description.
+    """
+    from .utils import freq_to_note
+
+    refs = sc_client.list_references()
+
+    if not refs:
+        return "No references captured. Use sc_capture_reference to capture a sound."
+
+    lines = [f"Captured References ({len(refs)}):", ""]
+
+    for ref in refs:
+        ts = datetime.fromtimestamp(ref.timestamp).strftime("%H:%M:%S")
+        note, octave, _ = freq_to_note(ref.analysis.freq)
+        desc = f" - {ref.description}" if ref.description else ""
+
+        lines.append(f"  '{ref.name}'{desc}")
+        lines.append(f"    Captured at {ts}")
+        lines.append(f"    Pitch: {note}{octave} ({ref.analysis.freq:.0f} Hz)")
+        lines.append(f"    Centroid: {ref.analysis.centroid:.0f} Hz")
+        lines.append(f"    Loudness: {ref.analysis.loudness_sones:.1f} sones")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def sc_delete_reference(name: str) -> str:
+    """Delete a stored reference.
+
+    Args:
+        name: Name of the reference to delete
+    """
+    _, message = sc_client.delete_reference(name)
+    return message
+
+
+# Parameter analysis tools
+
+@mcp.tool()
+def sc_analyze_parameter(
+    synthdef: str,
+    param: str,
+    values: list[float],
+    metric: str = "centroid",
+    base_params: Optional[dict[str, Any]] = None,
+) -> str:
+    """Analyze how a synth parameter affects a specific audio metric.
+
+    Sweeps a parameter through different values and measures the result.
+    Essential for understanding "which knob controls brightness?" type questions.
+
+    Args:
+        synthdef: Name of the SynthDef to test (must be loaded)
+        param: Parameter name to sweep (e.g., "freq", "cutoff", "resonance")
+        values: List of values to test (e.g., [200, 400, 800, 1600, 3200])
+        metric: What to measure - "pitch", "centroid" (brightness), "loudness", "flatness", or "rms"
+        base_params: Other fixed parameters (e.g., {"amp": 0.2, "dur": 0.5})
+
+    Example:
+        sc_analyze_parameter("mySynth", "cutoff", [500, 1000, 2000, 4000], "centroid", {"amp": 0.2})
+
+    Returns a table showing parameter_value → metric_value mapping.
+    """
+    success, message, results = sc_client.analyze_parameter_impact(
+        synthdef=synthdef,
+        param=param,
+        values=values,
+        metric=metric,
+        base_params=base_params,
+    )
+
+    if not success:
+        return message
+
+    if not results:
+        return "No results collected"
+
+    # Format as table
+    lines = [
+        f"Parameter Impact Analysis: {param} → {metric}",
+        f"SynthDef: {synthdef}",
+        "",
+        f"{'Value':>12} │ {metric.capitalize():>12}",
+        "─" * 12 + "─┼─" + "─" * 12,
+    ]
+
+    for r in results:
+        val_str = f"{r['value']:>12.2f}"
+        if r.get("metric") is not None:
+            metric_str = f"{r['metric']:>12.4f}"
+        else:
+            metric_str = f"{'N/A':>12}"
+        lines.append(f"{val_str} │ {metric_str}")
+
+    # Add summary
+    valid_results = [r for r in results if r.get("metric") is not None]
+    if len(valid_results) >= 2:
+        metrics = [r["metric"] for r in valid_results]
+        min_val = min(metrics)
+        max_val = max(metrics)
+        lines.append("")
+        lines.append(f"Range: {min_val:.4f} to {max_val:.4f}")
+
+        # Check correlation direction
+        first_metric = valid_results[0]["metric"]
+        last_metric = valid_results[-1]["metric"]
+        if last_metric > first_metric * 1.1:
+            lines.append(f"Trend: {param} ↑ causes {metric} ↑")
+        elif last_metric < first_metric * 0.9:
+            lines.append(f"Trend: {param} ↑ causes {metric} ↓")
+        else:
+            lines.append(f"Trend: {param} has minimal effect on {metric}")
+
+    return "\n".join(lines)

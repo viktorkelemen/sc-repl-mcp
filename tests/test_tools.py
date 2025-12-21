@@ -135,6 +135,7 @@ class TestScGetAnalysis:
                 "pitch": {"freq": 440.0, "note": "A4", "cents": 0.0, "confidence": 0.95},
                 "timbre": {"centroid": 880.0, "flatness": 0.1, "rolloff": 4000.0},
                 "amplitude": {"peak_l": 0.8, "peak_r": 0.75, "rms_l": 0.3, "rms_r": 0.28, "db_l": -10.5, "db_r": -11.1},
+                "loudness": {"sones": 12.5},
                 "is_silent": False,
                 "is_clipping": False,
             }
@@ -151,6 +152,7 @@ class TestScGetAnalysis:
         assert "Flatness: 0.100" in result
         assert "Peak: L=0.8000 R=0.7500" in result
         assert "RMS:  L=0.3000 R=0.2800" in result
+        assert "Loudness: 12.5 sones" in result
         assert "Silent: False" in result
         assert "Clipping: False" in result
 

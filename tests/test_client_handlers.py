@@ -556,3 +556,242 @@ class TestGetSpectrum:
         assert success is True
         for band in data["bands"]:
             assert band["db"] >= -60.0
+
+
+class TestHandleAnalysisLoudness:
+    """Tests for loudness field in analysis handler."""
+
+    def test_parses_loudness_when_present(self, client):
+        """Should parse loudness when included in OSC message."""
+        # 12 args: node_id, reply_id, freq, has_freq, centroid, flatness, rolloff, peak_l, peak_r, rms_l, rms_r, loudness
+        client._handle_analysis("/mcp/analysis", 1000, 1001, 440.0, 0.95, 880.0, 0.1, 4000.0, 0.8, 0.75, 0.3, 0.28, 15.5)
+
+        assert client._analysis_data is not None
+        assert client._analysis_data.loudness_sones == 15.5
+
+    def test_defaults_loudness_when_missing(self, client):
+        """Should default loudness to 0.0 when not in OSC message (backward compat)."""
+        # 11 args: no loudness (old format)
+        client._handle_analysis("/mcp/analysis", 1000, 1001, 440.0, 0.95, 880.0, 0.1, 4000.0, 0.8, 0.75, 0.3, 0.28)
+
+        assert client._analysis_data is not None
+        assert client._analysis_data.loudness_sones == 0.0
+
+
+class TestGetAnalysisLoudness:
+    """Tests for loudness in get_analysis output."""
+
+    def test_includes_loudness_in_output(self, client):
+        """get_analysis should include loudness in result dict."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            has_freq=0.95,
+            centroid=880.0,
+            flatness=0.1,
+            rolloff=4000.0,
+            peak_l=0.8,
+            peak_r=0.75,
+            rms_l=0.3,
+            rms_r=0.28,
+            loudness_sones=12.5,
+        )
+
+        success, message, data = client.get_analysis()
+
+        assert success is True
+        assert "loudness" in data
+        assert data["loudness"]["sones"] == 12.5
+
+
+class TestReferenceCapture:
+    """Tests for reference capture functionality."""
+
+    def test_capture_reference_success(self, client):
+        """Should capture current analysis as reference."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=880.0,
+            loudness_sones=10.0,
+        )
+
+        success, message = client.capture_reference("test_ref", "A test sound")
+
+        assert success is True
+        assert "captured" in message
+        assert "test_ref" in client._references
+        assert client._references["test_ref"].description == "A test sound"
+
+    def test_capture_fails_without_analyzer(self, client):
+        """Should fail if analyzer not running."""
+        client._analyzer_node_id = None
+
+        success, message = client.capture_reference("test")
+
+        assert success is False
+        assert "Analyzer not running" in message
+
+    def test_capture_fails_without_data(self, client):
+        """Should fail if no analysis data available."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = None
+
+        success, message = client.capture_reference("test")
+
+        assert success is False
+        assert "No analysis data" in message
+
+    def test_capture_overwrites_existing(self, client):
+        """Capturing same name should overwrite."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+        )
+
+        client.capture_reference("test", "First")
+        success, message = client.capture_reference("test", "Second")
+
+        assert success is True
+        assert "updated" in message
+        assert client._references["test"].description == "Second"
+
+    def test_list_references_empty(self, client):
+        """Should return empty list when no references."""
+        refs = client.list_references()
+        assert refs == []
+
+    def test_list_references_sorted_by_time(self, client):
+        """References should be sorted by timestamp."""
+        from sc_repl_mcp.types import ReferenceSnapshot
+
+        client._analyzer_node_id = 1000
+
+        # Directly add references with controlled timestamps
+        client._references["second"] = ReferenceSnapshot(
+            name="second",
+            timestamp=200.0,
+            analysis=AnalysisData(freq=880.0),
+        )
+        client._references["first"] = ReferenceSnapshot(
+            name="first",
+            timestamp=100.0,  # Earlier
+            analysis=AnalysisData(freq=440.0),
+        )
+
+        refs = client.list_references()
+        assert len(refs) == 2
+        assert refs[0].name == "first"  # Earlier timestamp
+        assert refs[1].name == "second"  # Later timestamp
+
+    def test_delete_reference_success(self, client):
+        """Should delete existing reference."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(timestamp=time.time(), freq=440.0)
+        client.capture_reference("test")
+
+        success, message = client.delete_reference("test")
+
+        assert success is True
+        assert "deleted" in message
+        assert "test" not in client._references
+
+    def test_delete_reference_not_found(self, client):
+        """Should fail when reference doesn't exist."""
+        success, message = client.delete_reference("nonexistent")
+
+        assert success is False
+        assert "not found" in message
+
+
+class TestReferenceComparison:
+    """Tests for reference comparison functionality."""
+
+    def test_compare_to_reference_success(self, client):
+        """Should compare current sound to reference."""
+        client._analyzer_node_id = 1000
+
+        # Capture reference
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=880.0,
+            loudness_sones=10.0,
+            flatness=0.1,
+            rms_l=0.3,
+        )
+        client.capture_reference("target")
+
+        # Change current sound
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=880.0,  # One octave higher
+            centroid=1760.0,  # Brighter
+            loudness_sones=15.0,  # Louder
+            flatness=0.2,  # More noise
+            rms_l=0.5,
+        )
+
+        success, message, data = client.compare_to_reference("target")
+
+        assert success is True
+        assert "pitch" in data
+        assert "brightness" in data
+        assert "loudness" in data
+        assert "overall_score" in data
+
+        # Check pitch difference (one octave = 12 semitones)
+        assert abs(data["pitch"]["diff_semitones"] - 12.0) < 0.1
+
+        # Check brightness ratio (1760/880 = 2.0)
+        assert abs(data["brightness"]["ratio"] - 2.0) < 0.1
+
+        # Check loudness difference (15 - 10 = 5 sones)
+        assert abs(data["loudness"]["diff_sones"] - 5.0) < 0.1
+
+    def test_compare_fails_without_reference(self, client):
+        """Should fail when reference doesn't exist."""
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(timestamp=time.time(), freq=440.0)
+
+        success, message, data = client.compare_to_reference("nonexistent")
+
+        assert success is False
+        assert "not found" in message
+        assert data is None
+
+    def test_compare_fails_without_analyzer(self, client):
+        """Should fail if analyzer not running."""
+        # First capture a reference
+        client._analyzer_node_id = 1000
+        client._analysis_data = AnalysisData(timestamp=time.time(), freq=440.0)
+        client.capture_reference("target")
+
+        # Stop analyzer
+        client._analyzer_node_id = None
+
+        success, message, data = client.compare_to_reference("target")
+
+        assert success is False
+        assert "Analyzer not running" in message
+
+    def test_compare_overall_score_range(self, client):
+        """Overall score should be between 0 and 100."""
+        client._analyzer_node_id = 1000
+
+        client._analysis_data = AnalysisData(
+            timestamp=time.time(),
+            freq=440.0,
+            centroid=880.0,
+            loudness_sones=10.0,
+            flatness=0.1,
+        )
+        client.capture_reference("target")
+
+        # Same sound should have high score
+        success, _, data = client.compare_to_reference("target")
+        assert 0 <= data["overall_score"] <= 100
+        assert data["overall_score"] > 90  # Nearly identical

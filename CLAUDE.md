@@ -21,10 +21,21 @@ This MCP server enables Claude to control SuperCollider for sound synthesis and 
 - `sc_load_synthdef(name, code)` - **Recommended** way to define SynthDefs
 - `sc_play_synth(synthdef, params, dur)` - Play any loaded SynthDef
 
+### Analysis Tools
+- `sc_start_analyzer` / `sc_stop_analyzer` - Audio monitoring
+- `sc_get_analysis` - Get pitch, timbre, amplitude, **loudness** data
+- `sc_get_spectrum` - 14-band frequency spectrum
+- `sc_get_onsets` - Detect attack/transient events
+
+### Sound Matching Tools
+- `sc_capture_reference(name, description)` - Snapshot current sound for comparison
+- `sc_compare_to_reference(name)` - Compare current sound to reference
+- `sc_list_references()` - Show all captured references
+- `sc_delete_reference(name)` - Remove a reference
+- `sc_analyze_parameter(synthdef, param, values, metric)` - Measure how parameters affect sound
+
 ### Advanced Tools
 - `sc_eval(code)` - Execute arbitrary SuperCollider code
-- `sc_start_analyzer` / `sc_stop_analyzer` - Audio monitoring
-- `sc_get_analysis` - Get pitch, timbre, amplitude data
 - `sc_get_logs` / `sc_clear_logs` - Server log access
 
 ## Defining SynthDefs
@@ -114,6 +125,48 @@ sc_load_synthdef("metallic", '''
     Out.ar(0, sig ! 2);
 ''')
 ```
+
+## Sound Matching Workflow
+
+Use reference capture and comparison to recreate target sounds:
+
+### 1. Capture Your Target Sound
+```python
+# Play the sound you want to match, then:
+sc_capture_reference("target", "bright metallic bell")
+```
+
+### 2. Create Your Synth and Compare
+```python
+# Load your synth
+sc_load_synthdef("mybell", '''...''')
+
+# Play it and compare
+sc_play_synth("mybell", params={"freq": 440})
+sc_compare_to_reference("target")
+```
+
+The comparison shows:
+- **Pitch difference** in semitones (e.g., "+2.5 semitones sharper")
+- **Brightness ratio** (e.g., "30% darker")
+- **Loudness difference** in sones (perceptual loudness)
+- **Character difference** (more tonal vs more noise-like)
+- **Overall match score** (0-100%)
+
+### 3. Analyze Parameter Impact
+Find which parameter controls brightness:
+```python
+sc_analyze_parameter("mybell", "cutoff", [500, 1000, 2000, 4000], "centroid")
+```
+
+Returns a table showing how `cutoff` affects `centroid` (brightness).
+
+### Analysis Metrics
+- `pitch` - Detected frequency in Hz
+- `centroid` - Spectral centroid (brightness) in Hz
+- `loudness` - Perceptual loudness in sones
+- `flatness` - 0 = tonal, 1 = noise-like
+- `rms` - RMS amplitude
 
 ## Debugging
 
