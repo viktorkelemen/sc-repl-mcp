@@ -4,10 +4,11 @@ import os
 import platform
 import shutil
 import subprocess
+import re
 import tempfile
 from typing import Optional
 
-from .config import MAX_EVAL_TIMEOUT, SCLANG_STDERR_SKIP_PREFIXES
+from .config import MAX_EVAL_TIMEOUT, SCLANG_STDERR_SKIP_PREFIXES, VALIDATE_TIMEOUT
 
 
 def find_sclang() -> Optional[str]:
@@ -148,3 +149,119 @@ s = Server.default;
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def escape_for_sc_string(code: str) -> str:
+    """Escape code for embedding in a SuperCollider string literal.
+
+    Args:
+        code: The code to escape.
+
+    Returns:
+        Escaped code safe for embedding in double-quoted SC string.
+    """
+    return (
+        code.replace("\\", "\\\\")  # Backslashes first
+        .replace("\0", "")  # Remove null bytes (can't be in SC strings)
+        .replace('"', '\\"')  # Double quotes
+        .replace("\n", "\\n")  # Newlines
+        .replace("\r", "\\r")  # Carriage returns
+        .replace("\t", "\\t")  # Tabs
+    )
+
+
+def parse_sclang_errors(output: str) -> list[dict]:
+    """Parse error messages from sclang output.
+
+    Args:
+        output: Combined stdout/stderr from sclang.
+
+    Returns:
+        List of error dicts with 'line', 'column', and 'message' keys.
+    """
+    errors = []
+
+    # Pattern for SC error messages like "ERROR: syntax error, unexpected ..."
+    # or "Parse error in interpreted code: ..."
+    error_pattern = re.compile(r"(ERROR|Parse error|syntax error)[:\s]+(.+)", re.IGNORECASE)
+
+    # Pattern for line number references like "line 5" or "at line 5"
+    line_pattern = re.compile(r"(?:at |in )?line\s+(\d+)", re.IGNORECASE)
+
+    for line in output.split("\n"):
+        match = error_pattern.search(line)
+        if match:
+            message = match.group(2).strip()
+
+            # Try to extract line number
+            line_match = line_pattern.search(line)
+            error_line = int(line_match.group(1)) if line_match else 1
+
+            errors.append(
+                {
+                    "line": error_line,
+                    "column": 1,  # sclang doesn't provide column info
+                    "message": message,
+                }
+            )
+
+    # If no structured errors found, include the raw output as a single error
+    if not errors and output.strip():
+        # Look for any error-like content
+        for line in output.split("\n"):
+            line = line.strip()
+            if line and not line.startswith(SCLANG_STDERR_SKIP_PREFIXES):
+                if "error" in line.lower() or "unexpected" in line.lower():
+                    errors.append({"line": 1, "column": 1, "message": line})
+
+    return errors
+
+
+def validate_syntax_sclang(
+    code: str, timeout: float = VALIDATE_TIMEOUT
+) -> tuple[bool, str, list[dict]]:
+    """Validate SuperCollider code syntax using sclang's compile().
+
+    Uses sclang's interpreter to compile (parse) code without executing it.
+    This is the authoritative validation since it uses the real SC parser.
+
+    Args:
+        code: SuperCollider code to validate.
+        timeout: Maximum time to wait for sclang (default 10s).
+
+    Returns:
+        Tuple of (is_valid, message, errors) where errors is a list of
+        dicts with 'line', 'column', and 'message' keys.
+    """
+    if not code or not code.strip():
+        return True, "Empty code is valid", []
+
+    # Escape the code for embedding in SC string
+    escaped = escape_for_sc_string(code)
+
+    # Validation code: compile without executing
+    # thisProcess.interpreter.compile() returns nil on parse error
+    # Note: eval_sclang appends 0.exit automatically
+    validation_code = f'''
+var code = "{escaped}";
+var result = thisProcess.interpreter.compile(code);
+if(result.isNil) {{
+    "SYNTAX_ERROR".postln;
+}} {{
+    "SYNTAX_OK".postln;
+}}
+'''
+
+    success, output = eval_sclang(validation_code, timeout=timeout)
+
+    if "SYNTAX_OK" in output:
+        return True, "Syntax valid", []
+
+    # Parse any error messages from the output
+    errors = parse_sclang_errors(output)
+
+    if not errors:
+        # Generic error if we couldn't parse specifics
+        errors = [{"line": 1, "column": 1, "message": "Syntax error (details unavailable)"}]
+
+    return False, f"Found {len(errors)} syntax error(s)", errors

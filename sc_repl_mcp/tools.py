@@ -568,3 +568,46 @@ def sc_analyze_parameter(
             lines.append(f"Trend: {param} has minimal effect on {metric}")
 
     return "\n".join(lines)
+
+
+# Syntax validation tool
+
+@mcp.tool()
+def sc_validate_syntax(code: str) -> str:
+    """Validate SuperCollider code syntax without executing it.
+
+    Uses tree-sitter for fast validation (~5ms) with sclang compile() fallback
+    for edge cases (~200ms). Does not execute the code or produce sound.
+
+    Useful for:
+    - Checking SynthDef code before loading
+    - Validating code snippets
+    - Finding syntax errors with line numbers
+
+    Args:
+        code: SuperCollider code to validate
+
+    Returns:
+        Validation result with any error details including line numbers.
+        Shows which backend (tree-sitter or sclang) was used.
+
+    Example:
+        sc_validate_syntax("SinOsc.ar(440)")  # Valid
+        sc_validate_syntax("{ SinOsc.ar(440 }")  # Error: mismatched brackets
+    """
+    from .syntax import get_validator
+
+    validator = get_validator()
+    is_valid, message, errors = validator.validate(code)
+
+    if is_valid:
+        return f"Syntax valid (checked with {validator.backend})"
+
+    lines = [f"Syntax errors found (checked with {validator.backend}):"]
+    for err in errors:
+        line_info = f"Line {err['line']}"
+        if err.get("column", 1) > 1:
+            line_info += f", col {err['column']}"
+        lines.append(f"  {line_info}: {err['message']}")
+
+    return "\n".join(lines)

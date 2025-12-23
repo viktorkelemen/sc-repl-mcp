@@ -47,6 +47,9 @@ Do NOT rely on memory for SC specifics - the API has many subtle variations that
 - `sc_delete_reference(name)` - Remove a reference
 - `sc_analyze_parameter(synthdef, param, values, metric)` - Measure how parameters affect sound
 
+### Syntax Validation
+- `sc_validate_syntax(code)` - Check code syntax without executing (fast ~5ms)
+
 ### Advanced Tools
 - `sc_eval(code)` - Execute arbitrary SuperCollider code
 - `sc_get_logs` / `sc_clear_logs` - Server log access
@@ -180,6 +183,28 @@ Returns a table showing how `cutoff` affects `centroid` (brightness).
 - `loudness` - Perceptual loudness in sones
 - `flatness` - 0 = tonal, 1 = noise-like
 - `rms` - RMS amplitude
+
+## Syntax Validation
+
+Check code syntax before executing:
+
+```python
+# Validate a SynthDef before loading
+sc_validate_syntax('''
+    SynthDef(\\test, {
+        var sig = SinOsc.ar(440);
+        Out.ar(0, sig);
+    })
+''')
+# Returns: "Syntax valid (checked with tree-sitter)"
+
+# Catch errors with line numbers
+sc_validate_syntax("{ SinOsc.ar(440 }")
+# Returns: "Syntax errors found (checked with tree-sitter):
+#   Line 1, col 17: Unexpected syntax near: { SinOsc.ar(440 }"
+```
+
+The validator uses tree-sitter for fast (~5ms) validation, with sclang compile() as a fallback for edge cases.
 
 ## Debugging
 
