@@ -7,6 +7,7 @@ REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed 
 
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
+VALIDATE_TIMEOUT = 10.0  # Timeout for syntax validation (seconds)
 
 # Spectrum analyzer band frequencies (Hz) - logarithmic spacing from ~60Hz to ~16kHz
 # These must match between Python (client.py) and SuperCollider (config.py, mcp_synthdefs.scd)
