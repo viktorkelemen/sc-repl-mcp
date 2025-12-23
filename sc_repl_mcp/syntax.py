@@ -55,6 +55,18 @@ class SyntaxValidator:
         """Return the name of the active validation backend."""
         return self._backend
 
+    @property
+    def fallback_reason(self) -> Optional[str]:
+        """Return the reason for using sclang fallback, or None if using tree-sitter."""
+        if self._backend == "tree-sitter":
+            return None
+        if not TREE_SITTER_AVAILABLE:
+            return "tree-sitter not installed"
+        grammar_path = get_grammar_path()
+        if not grammar_path.exists():
+            return f"grammar not built (run: python scripts/build_grammar.py)"
+        return "tree-sitter initialization failed"
+
     def _init_tree_sitter(self) -> bool:
         """Initialize tree-sitter parser if available.
 
@@ -82,8 +94,17 @@ class SyntaxValidator:
             self._backend = "tree-sitter"
             logger.debug("tree-sitter initialized successfully")
             return True
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
+            # Expected errors: file issues, invalid grammar format
             logger.warning(f"Failed to initialize tree-sitter: {e}")
+            self._backend = "sclang"
+            return False
+        except Exception as e:
+            # Unexpected error - log with full context
+            logger.error(
+                f"Unexpected error initializing tree-sitter: {type(e).__name__}: {e}",
+                exc_info=True
+            )
             self._backend = "sclang"
             return False
 
@@ -112,9 +133,12 @@ class SyntaxValidator:
         try:
             tree = self._parser.parse(bytes(code, "utf8"))
         except Exception as e:
-            logger.error(f"tree-sitter parse failed: {e}")
-            # Fall back to sclang if tree-sitter fails
-            return self._validate_sclang(code)
+            logger.error(f"tree-sitter parse failed: {type(e).__name__}: {e}", exc_info=True)
+            # Fall back to sclang, include context about the fallback
+            is_valid, message, errors = self._validate_sclang(code)
+            if is_valid:
+                message = f"{message} (Note: tree-sitter failed, used sclang)"
+            return is_valid, message, errors
 
         errors = []
         self._collect_errors(tree.root_node, code, errors)

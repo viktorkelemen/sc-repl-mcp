@@ -56,21 +56,52 @@ def build() -> bool:
     with tempfile.TemporaryDirectory() as tmpdir:
         # Clone grammar repo
         print("  Cloning grammar repository...")
-        result = subprocess.run(
-            ["git", "clone", "--depth=1", GRAMMAR_REPO, tmpdir],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "clone", "--depth=1", GRAMMAR_REPO, tmpdir],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            print("Error: git not found.")
+            print("\nSolution: Install git and ensure it's in your PATH")
+            print("  - macOS: xcode-select --install")
+            print("  - Ubuntu/Debian: sudo apt install git")
+            print("  - Windows: https://git-scm.com/download/win")
+            return False
+
         if result.returncode != 0:
+            stderr = result.stderr.lower()
             print(f"Error cloning repository: {result.stderr}")
+            if "could not resolve" in stderr or "unable to access" in stderr:
+                print("\nSolution: Check your internet connection")
+            elif "permission denied" in stderr:
+                print(f"\nSolution: Check write permissions for {tmpdir}")
             return False
 
         # Build using tree-sitter
         print("  Compiling grammar...")
         try:
             Language.build_library(str(output_path), [tmpdir])
+        except FileNotFoundError as e:
+            print(f"Error: C compiler not found.")
+            print("\nSolution: Install a C compiler:")
+            print("  - macOS: xcode-select --install")
+            print("  - Ubuntu/Debian: sudo apt install build-essential")
+            print("  - Windows: Install Visual Studio Build Tools")
+            print(f"\nDetails: {e}")
+            return False
+        except PermissionError as e:
+            print(f"Error: Cannot write to {output_path}")
+            print("\nSolution: Check directory permissions or run with appropriate access")
+            print(f"\nDetails: {e}")
+            return False
         except Exception as e:
-            print(f"Error building grammar: {e}")
+            print(f"Error building grammar: {type(e).__name__}: {e}")
+            print("\nPossible causes:")
+            print("  - Missing C compiler (install gcc or clang)")
+            print("  - Corrupt grammar files (try re-running)")
+            print("  - Insufficient disk space")
             return False
 
     print(f"Grammar built successfully: {output_path}")

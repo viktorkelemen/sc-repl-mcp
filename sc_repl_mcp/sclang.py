@@ -257,11 +257,30 @@ if(result.isNil) {{
     if "SYNTAX_OK" in output:
         return True, "Syntax valid", []
 
+    # Check for infrastructure errors (not syntax errors)
+    output_lower = output.lower()
+    if "timed out" in output_lower:
+        return False, "Validation timed out", [
+            {"line": 1, "column": 1, "message": f"sclang timed out after {timeout}s - code may be valid"}
+        ]
+
+    if "sclang not found" in output_lower:
+        return False, "sclang unavailable", [
+            {"line": 1, "column": 1, "message": "sclang not found - install SuperCollider"}
+        ]
+
+    if not success:
+        # Log infrastructure failures
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"sclang validation failed: {output[:200]}")
+
     # Parse any error messages from the output
     errors = parse_sclang_errors(output)
 
     if not errors:
-        # Generic error if we couldn't parse specifics
-        errors = [{"line": 1, "column": 1, "message": "Syntax error (details unavailable)"}]
+        # Include raw output for debugging when no structured errors found
+        error_msg = output.strip()[:200] if output.strip() else "Syntax error (details unavailable)"
+        errors = [{"line": 1, "column": 1, "message": error_msg}]
 
     return False, f"Found {len(errors)} syntax error(s)", errors

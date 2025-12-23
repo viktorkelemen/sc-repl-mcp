@@ -279,3 +279,177 @@ class TestGrammarPath:
             assert path.suffix == ".dll"
         else:
             assert path.suffix == ".so"
+
+
+class TestScValidateSyntaxTool:
+    """Tests for sc_validate_syntax MCP tool."""
+
+    def test_valid_code_returns_success_message(self, mocker):
+        """Tool should return success message for valid code."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        # Mock the validator (mock where it's defined, not where imported)
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (True, "Syntax valid", [])
+        mock_validator.backend = "tree-sitter"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("SinOsc.ar(440);")
+
+        assert "Syntax valid" in result
+        assert "tree-sitter" in result
+
+    def test_invalid_code_shows_errors_with_line_numbers(self, mocker):
+        """Tool should format errors with line numbers."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (
+            False,
+            "Found 1 syntax error(s)",
+            [{"line": 3, "column": 5, "message": "Unexpected syntax"}],
+        )
+        mock_validator.backend = "tree-sitter"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("broken code")
+
+        assert "Syntax errors found" in result
+        assert "Line 3" in result
+        assert "col 5" in result
+        assert "Unexpected syntax" in result
+
+    def test_shows_fallback_reason_when_using_sclang(self, mocker):
+        """Tool should show why sclang is being used."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (True, "Syntax valid", [])
+        mock_validator.backend = "sclang"
+        mock_validator.fallback_reason = "tree-sitter not installed"
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("SinOsc.ar(440);")
+
+        assert "sclang" in result
+        assert "tree-sitter not installed" in result
+
+    def test_handles_sclang_not_found(self, mocker):
+        """Tool should show helpful message when sclang not found."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (
+            False,
+            "sclang unavailable",
+            [{"line": 1, "column": 1, "message": "sclang not found - install SuperCollider"}],
+        )
+        mock_validator.backend = "sclang"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("SinOsc.ar(440);")
+
+        assert "Cannot validate" in result
+        assert "sclang not installed" in result
+
+    def test_handles_timeout(self, mocker):
+        """Tool should show helpful message on timeout."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (
+            False,
+            "Validation timed out",
+            [{"line": 1, "column": 1, "message": "sclang timed out after 10s - code may be valid"}],
+        )
+        mock_validator.backend = "sclang"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("long code")
+
+        assert "timed out" in result.lower()
+        assert "may be valid" in result
+
+    def test_column_only_shown_when_greater_than_1(self, mocker):
+        """Tool should not show column when it's 1."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (
+            False,
+            "Found 1 syntax error(s)",
+            [{"line": 5, "column": 1, "message": "Error"}],
+        )
+        mock_validator.backend = "tree-sitter"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("broken")
+
+        assert "Line 5" in result
+        assert "col" not in result  # Column 1 should not be shown
+
+
+class TestValidateSyntaxSclangEdgeCases:
+    """Edge case tests for validate_syntax_sclang."""
+
+    def test_empty_code_returns_valid(self):
+        """Empty code should return valid without calling sclang."""
+        is_valid, msg, errors = validate_syntax_sclang("")
+        assert is_valid
+        assert errors == []
+
+    def test_whitespace_only_returns_valid(self):
+        """Whitespace-only code should return valid."""
+        is_valid, msg, errors = validate_syntax_sclang("   \n\t  ")
+        assert is_valid
+        assert errors == []
+
+    def test_timeout_returns_specific_error(self, mocker):
+        """Timeout should return specific error, not generic syntax error."""
+        mocker.patch(
+            "sc_repl_mcp.sclang.eval_sclang",
+            return_value=(False, "sclang execution timed out after 10s"),
+        )
+
+        is_valid, msg, errors = validate_syntax_sclang("long code")
+
+        assert not is_valid
+        assert "timed out" in msg.lower()
+        assert "may be valid" in errors[0]["message"]
+
+    def test_sclang_not_found_returns_specific_error(self, mocker):
+        """sclang not found should return specific error."""
+        mocker.patch(
+            "sc_repl_mcp.sclang.eval_sclang",
+            return_value=(False, "sclang not found. Make sure SuperCollider is installed"),
+        )
+
+        is_valid, msg, errors = validate_syntax_sclang("code")
+
+        assert not is_valid
+        assert "unavailable" in msg.lower()
+        assert "install" in errors[0]["message"].lower()
+
+
+class TestSyntaxValidatorFallbackReason:
+    """Tests for fallback_reason property."""
+
+    def test_fallback_reason_none_when_tree_sitter_active(self):
+        """fallback_reason should be None when tree-sitter is active."""
+        validator = SyntaxValidator()
+        if validator.backend == "tree-sitter":
+            assert validator.fallback_reason is None
+        else:
+            pytest.skip("tree-sitter not available")
+
+    def test_fallback_reason_set_when_sclang(self):
+        """fallback_reason should explain why sclang is being used."""
+        validator = SyntaxValidator()
+        if validator.backend == "sclang":
+            assert validator.fallback_reason is not None
+            assert len(validator.fallback_reason) > 0

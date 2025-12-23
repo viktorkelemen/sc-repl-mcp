@@ -600,10 +600,23 @@ def sc_validate_syntax(code: str) -> str:
     validator = get_validator()
     is_valid, message, errors = validator.validate(code)
 
-    if is_valid:
-        return f"Syntax valid (checked with {validator.backend})"
+    # Build backend info string
+    backend_info = validator.backend
+    if validator.fallback_reason:
+        backend_info += f" - {validator.fallback_reason}"
 
-    lines = [f"Syntax errors found (checked with {validator.backend}):"]
+    if is_valid:
+        return f"Syntax valid (checked with {backend_info})"
+
+    # Check for infrastructure errors (not syntax errors)
+    for err in errors:
+        err_msg = err.get("message", "").lower()
+        if "sclang not found" in err_msg:
+            return "Cannot validate: sclang not installed. Install SuperCollider for validation."
+        if "timed out" in err_msg:
+            return f"Validation timed out. Code may be valid but could not be verified.\n  {err['message']}"
+
+    lines = [f"Syntax errors found (checked with {backend_info}):"]
     for err in errors:
         line_info = f"Line {err['line']}"
         if err.get("column", 1) > 1:
