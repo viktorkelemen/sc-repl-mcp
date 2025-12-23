@@ -8,7 +8,9 @@ MCP (Model Context Protocol) server for SuperCollider integration with Claude Co
 - **Load SynthDefs** reliably with automatic disk-write pattern
 - **Play synths** with custom parameters and timing
 - **Execute code** - run arbitrary SuperCollider code
+- **Validate syntax** - check code for errors without executing (tree-sitter + sclang fallback)
 - **Analyze audio** - real-time pitch, timbre, and amplitude monitoring
+- **Compare sounds** - capture references and compare against them
 - **Debug** - access server logs and error messages
 
 ## Prerequisites
@@ -53,10 +55,18 @@ Or add to `~/.claude/settings.json`:
 | `sc_play_synth` | Play any SynthDef with parameters |
 | `sc_load_synthdef` | Load a SynthDef reliably |
 | `sc_eval` | Execute arbitrary SuperCollider code |
+| `sc_validate_syntax` | Check code syntax without executing |
 | `sc_free_all` | Free all running synths |
 | `sc_start_analyzer` | Start audio analysis |
 | `sc_stop_analyzer` | Stop audio analysis |
 | `sc_get_analysis` | Get pitch/timbre/amplitude data |
+| `sc_get_onsets` | Get detected onset/attack events |
+| `sc_get_spectrum` | Get frequency spectrum data |
+| `sc_capture_reference` | Save current sound as reference |
+| `sc_compare_to_reference` | Compare current sound to reference |
+| `sc_list_references` | List saved sound references |
+| `sc_delete_reference` | Delete a saved reference |
+| `sc_analyze_parameter` | Analyze how a parameter affects sound |
 | `sc_get_logs` | View server log messages |
 | `sc_clear_logs` | Clear log buffer |
 
@@ -78,6 +88,35 @@ Claude Code <--stdio/JSON-RPC--> sc-repl MCP <--OSC--> scsynth (port 57110)
 
 The server uses OSC (Open Sound Control) to communicate directly with scsynth.
 A persistent sclang process handles SynthDef loading and OSC forwarding.
+
+## Syntax Validation
+
+The `sc_validate_syntax` tool uses a hybrid approach:
+
+1. **tree-sitter** (fast, ~5ms) - Primary validation using a SuperCollider grammar
+2. **sclang compile()** (accurate, ~200ms) - Fallback when tree-sitter unavailable
+
+### Building the Grammar
+
+The tree-sitter grammar must be compiled before first use:
+
+```bash
+uv run python scripts/build_grammar.py
+```
+
+Requires: git, C compiler (gcc/clang)
+
+### Known Limitations
+
+The tree-sitter grammar has some false positives with advanced SC syntax:
+
+| Pattern | Status | Workaround |
+|---------|--------|------------|
+| `arr[i % 8]` | False positive | `var idx = i % 8; arr[idx]` |
+| `Out.ar(0, sig ! 2)` | False positive | `Out.ar(0, sig.dup(2))` |
+| `` `[freqs, amps] `` | False positive | Use variable: `var spec = [f,a]; Klank.ar(spec)` |
+
+These patterns are valid SuperCollider and will execute correctly - the validator just can't parse them.
 
 ## Documentation
 
