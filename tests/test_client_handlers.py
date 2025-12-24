@@ -1106,3 +1106,124 @@ class TestReferenceComparisonEdgeCases:
 
         assert success is False
         assert "stale" in message.lower()
+
+
+class TestHandleEvalResult:
+    """Tests for _handle_eval_result handler for persistent sclang."""
+
+    def test_stores_result(self, client):
+        """Handler should store result for matching request ID."""
+        import threading
+
+        # Set up a pending request
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        client._handle_eval_result("/mcp/eval/result", 42, 1, "Success!")
+
+        assert 42 in client._eval_results
+        success, output = client._eval_results[42]
+        assert success is True
+        assert output == "Success!"
+
+    def test_signals_event(self, client):
+        """Handler should signal the waiting event."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        assert not event.is_set()
+        client._handle_eval_result("/mcp/eval/result", 42, 1, "Done")
+        assert event.is_set()
+
+    def test_handles_error_result(self, client):
+        """Handler should store error results correctly."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[99] = event
+
+        client._handle_eval_result("/mcp/eval/result", 99, 0, "ERROR: Parse error")
+
+        success, output = client._eval_results[99]
+        assert success is False
+        assert "Parse error" in output
+
+    def test_ignores_short_args(self, client):
+        """Handler should not crash with fewer than 3 args."""
+        # This should not raise
+        client._handle_eval_result("/mcp/eval/result", 42, 1)
+
+    def test_handles_none_output(self, client):
+        """Handler should handle None output gracefully."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        client._handle_eval_result("/mcp/eval/result", 42, 1, None)
+
+        success, output = client._eval_results[42]
+        assert output == ""
+
+
+class TestIsSclangReady:
+    """Tests for is_sclang_ready method."""
+
+    def test_returns_false_when_no_process(self, client):
+        """Should return False when no sclang process exists."""
+        client._sclang_process = None
+        assert client.is_sclang_ready() is False
+
+    def test_returns_false_when_process_exited(self, client, mocker):
+        """Should return False when sclang process has exited."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = 1  # Process exited with code 1
+        client._sclang_process = mock_proc
+
+        assert client.is_sclang_ready() is False
+
+    def test_returns_true_when_process_running(self, client, mocker):
+        """Should return True when sclang process is running."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None  # Process still running
+        client._sclang_process = mock_proc
+
+        assert client.is_sclang_ready() is True
+
+
+class TestEvalCode:
+    """Tests for eval_code method (persistent sclang execution)."""
+
+    def test_rejects_empty_code(self, client):
+        """Should reject empty code."""
+        success, message = client.eval_code("")
+        assert success is False
+        assert "No code provided" in message
+
+    def test_rejects_whitespace_only(self, client):
+        """Should reject whitespace-only code."""
+        success, message = client.eval_code("   \n\t  ")
+        assert success is False
+        assert "No code provided" in message
+
+    def test_requires_sclang_running(self, client):
+        """Should fail when sclang not running."""
+        client._sclang_process = None
+
+        success, message = client.eval_code("1 + 1")
+        assert success is False
+        assert "not running" in message.lower()
+
+    def test_requires_connection(self, client, mocker):
+        """Should fail when not connected."""
+        # Mock sclang as running
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._reply_server = None
+
+        success, message = client.eval_code("1 + 1")
+        assert success is False
+        assert "Not connected" in message

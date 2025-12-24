@@ -242,7 +242,13 @@ SynthDef(\\{name}, {{
 s.sendMsg(\\d_load, SynthDef.synthDefDir ++ "{name}.scsyndef");
 "SynthDef '{name}' loaded".postln;
 """
-    success, output = eval_sclang(full_code, timeout=timeout)
+    # Try persistent sclang first (much faster - no class library recompilation)
+    if sc_client.is_sclang_ready():
+        success, output = sc_client.eval_code(full_code, timeout=timeout)
+    else:
+        # Fall back to spawning fresh sclang process
+        success, output = eval_sclang(full_code, timeout=timeout)
+
     if success:
         return f"SynthDef '{name}' loaded successfully"
     return f"Error loading SynthDef '{name}':\n{output}"
@@ -252,7 +258,10 @@ s.sendMsg(\\d_load, SynthDef.synthDefDir ++ "{name}.scsyndef");
 def sc_eval(code: str, timeout: float = 120.0) -> str:
     """Execute arbitrary SuperCollider (sclang) code.
 
-    This spawns a new sclang process to execute the code. Useful for:
+    Uses the persistent sclang process when available (fast, ~10ms), falling
+    back to spawning a new process if needed (slower, ~2-5s startup).
+
+    Useful for:
     - Playing sequences with s.sendBundle()
     - Testing SuperCollider expressions
     - One-off synthesis with { }.play
@@ -282,12 +291,20 @@ def sc_eval(code: str, timeout: float = 120.0) -> str:
         s.sendBundle(0.4, [\\s_new, \\default, -1, 0, 0, \\freq, 660]);
         "Scheduled 3 notes".postln;
 
-    Note: Each call spawns a fresh sclang process, so state doesn't persist.
+    Note: State persists within the session when using persistent sclang.
     """
-    success, output = eval_sclang(code, timeout=timeout)
+    # Try persistent sclang first (much faster - no class library recompilation)
+    if sc_client.is_sclang_ready():
+        success, output = sc_client.eval_code(code, timeout=timeout)
+        method = "persistent"
+    else:
+        # Fall back to spawning fresh sclang process
+        success, output = eval_sclang(code, timeout=timeout)
+        method = "fresh process"
+
     if success:
-        return f"Executed successfully:\n{output}"
-    return f"Error:\n{output}"
+        return f"Executed successfully ({method}):\n{output}"
+    return f"Error ({method}):\n{output}"
 
 
 @mcp.tool()

@@ -336,7 +336,7 @@ class TestScEval:
         from sc_repl_mcp.tools import sc_eval
         result = sc_eval(code="bad code")
 
-        assert "Error:" in result
+        assert "Error" in result
         assert "Parse error" in result
 
     def test_passes_timeout(self, mocker):

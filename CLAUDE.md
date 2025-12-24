@@ -9,6 +9,15 @@ This MCP server enables Claude to control SuperCollider for sound synthesis and 
 3. **Analyze**: `sc_start_analyzer` then `sc_get_analysis` to monitor audio
 4. **Debug**: `sc_get_logs` to see server messages and errors
 
+## Performance: Persistent sclang
+
+After `sc_connect`, a persistent sclang process stays running. This makes `sc_eval` and `sc_load_synthdef` **much faster** (~10ms vs 2-5s) by avoiding class library recompilation on each call.
+
+- **Connected**: Uses persistent sclang (fast)
+- **Not connected**: Falls back to spawning fresh sclang (slow)
+
+State persists within the session, so variables and functions defined in one `sc_eval` call are available in subsequent calls.
+
 ## SuperCollider Verification
 
 When writing SynthDefs or SC code, ALWAYS use WebSearch to verify:

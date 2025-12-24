@@ -41,6 +41,8 @@ class SCClient:
         self._node_id = 1_000_000 + (int(time.time() * 1000) & 0xFFFFF) * 1000
         self._node_lock = threading.Lock()
         self._scsynth_addr = (SCSYNTH_HOST, SCSYNTH_PORT)
+        # sclang address for code execution (same host, default sclang port)
+        self._sclang_addr = (SCSYNTH_HOST, 57120)
 
         # Audio analysis state
         self._analyzer_node_id: Optional[int] = None
@@ -68,6 +70,12 @@ class SCClient:
         self._log_buffer: deque[LogEntry] = deque(maxlen=500)
         self._log_lock = threading.Lock()
 
+        # Persistent sclang code execution state
+        self._eval_request_id = 0
+        self._eval_request_lock = threading.Lock()
+        self._eval_results: dict[int, tuple[bool, str]] = {}  # request_id -> (success, output)
+        self._eval_events: dict[int, threading.Event] = {}  # request_id -> event
+
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
 
@@ -81,6 +89,23 @@ class SCClient:
                 builder.add_arg(arg)
             msg = builder.build()
             self._reply_server.socket.sendto(msg.dgram, self._scsynth_addr)
+            return True
+        except Exception:
+            return False
+
+    def _send_to_sclang(self, address: str, args: list) -> bool:
+        """Send an OSC message to sclang using the reply server's socket.
+
+        Returns True if message was sent, False otherwise.
+        """
+        if not self._reply_server:
+            return False
+        try:
+            builder = osc_message_builder.OscMessageBuilder(address=address)
+            for arg in args:
+                builder.add_arg(arg)
+            msg = builder.build()
+            self._reply_server.socket.sendto(msg.dgram, self._sclang_addr)
             return True
         except Exception:
             return False
@@ -225,6 +250,26 @@ class SCClient:
         with self._spectrum_lock:
             self._spectrum_data = data
 
+    def _handle_eval_result(self, address: str, *args):
+        """Handle /mcp/eval/result messages from persistent sclang.
+
+        Expected args: [request_id, success, output]
+        """
+        if len(args) < 3:
+            return
+
+        request_id = int(args[0])
+        success = bool(args[1])
+        output = str(args[2]) if args[2] is not None else ""
+
+        with self._eval_request_lock:
+            # Store the result
+            self._eval_results[request_id] = (success, output)
+            # Signal the waiting thread
+            event = self._eval_events.get(request_id)
+            if event:
+                event.set()
+
     def _start_sclang(self) -> tuple[bool, str]:
         """Start persistent sclang process for SynthDefs and OSC forwarding."""
         # Stop any existing sclang process
@@ -332,6 +377,7 @@ class SCClient:
             disp.map("/mcp/meter", self._handle_meter)
             disp.map("/mcp/onset", self._handle_onset)
             disp.map("/mcp/spectrum", self._handle_spectrum)
+            disp.map("/mcp/eval/result", self._handle_eval_result)
 
             # Try to bind, killing orphaned processes if needed
             for attempt in range(2):
@@ -708,6 +754,86 @@ class SCClient:
         """Clear the log buffer."""
         with self._log_lock:
             self._log_buffer.clear()
+
+    # Persistent sclang code execution
+
+    def is_sclang_ready(self) -> bool:
+        """Check if persistent sclang is running and ready for code execution."""
+        return self._sclang_process is not None and self._sclang_process.poll() is None
+
+    def eval_code(self, code: str, timeout: float = 30.0) -> tuple[bool, str]:
+        """Execute SuperCollider code via the persistent sclang process.
+
+        This is much faster than spawning a new sclang process because the
+        class library is already compiled.
+
+        Args:
+            code: SuperCollider code to execute
+            timeout: Maximum time to wait for result (default 30s)
+
+        Returns:
+            (success, output) tuple
+        """
+        if not code or not code.strip():
+            return False, "No code provided"
+
+        if not self.is_sclang_ready():
+            return False, "Persistent sclang not running. Call sc_connect first."
+
+        if not self._reply_server:
+            return False, "Not connected. Call sc_connect first."
+
+        # Generate unique request ID
+        with self._eval_request_lock:
+            self._eval_request_id += 1
+            request_id = self._eval_request_id
+            # Create event for this request
+            event = threading.Event()
+            self._eval_events[request_id] = event
+
+        # Write code to temp file (OSC has size limits)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.scd',
+                delete=False,
+            ) as f:
+                f.write(code)
+                temp_path = f.name
+
+            # Send execution request to sclang
+            if not self._send_to_sclang("/mcp/eval", [request_id, temp_path]):
+                return False, "Failed to send code to sclang"
+
+            # Wait for result
+            if not event.wait(timeout=timeout):
+                # Timeout - clean up
+                with self._eval_request_lock:
+                    self._eval_events.pop(request_id, None)
+                    self._eval_results.pop(request_id, None)
+                return False, f"sclang execution timed out after {timeout}s"
+
+            # Get result
+            with self._eval_request_lock:
+                result = self._eval_results.pop(request_id, None)
+                self._eval_events.pop(request_id, None)
+
+            if result is None:
+                return False, "No result received from sclang"
+
+            success, output = result
+            return success, output
+
+        except Exception as e:
+            return False, f"Error executing code: {e}"
+        finally:
+            # Clean up temp file
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
 
     # Reference capture and comparison methods
 

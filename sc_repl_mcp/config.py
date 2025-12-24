@@ -133,7 +133,41 @@ OSCFunc({ |msg|
     ~mcpAddr.sendMsg(*msg);
 }, '/mcp/meter');
 
-"MCP sclang ready with OSC forwarding to port 57130".postln;
+// Code execution responder - allows Python to execute SC code via OSC
+// This avoids spawning fresh sclang processes (which require class library recompilation)
+OSCFunc({ |msg|
+    var requestId = msg[1].asInteger;
+    var filePath = msg[2].asString;
+    var code, result, success, output;
+
+    try {
+        // Read code from file
+        code = File.readAllString(filePath);
+
+        // Execute the code in the interpreter
+        // Note: This returns the value of the last expression
+        result = thisProcess.interpreter.interpret(code);
+
+        success = 1;
+        output = if(result.notNil) { result.asString } { "(nil)" };
+
+        // Truncate long outputs (OSC has ~8KB practical limit)
+        if(output.size > 7000) {
+            output = output.keep(7000) ++ "... (truncated)";
+        };
+    } { |error|
+        success = 0;
+        output = error.errorString;
+        if(output.size > 7000) {
+            output = output.keep(7000) ++ "... (truncated)";
+        };
+    };
+
+    // Send result back to Python
+    ~mcpAddr.sendMsg('/mcp/eval/result', requestId, success, output);
+}, '/mcp/eval');
+
+"MCP sclang ready with OSC forwarding and code execution on port 57130".postln;
 
 // Keep sclang running indefinitely
 { inf.wait }.defer;
