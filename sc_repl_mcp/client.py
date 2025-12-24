@@ -844,6 +844,9 @@ class SCClient:
             return success, output
 
         except Exception as e:
+            # Clean up event on any failure
+            with self._eval_request_lock:
+                self._eval_events.pop(request_id, None)
             return False, f"Error executing code: {e}"
         finally:
             # Clean up temp file

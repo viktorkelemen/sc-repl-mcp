@@ -1160,6 +1160,15 @@ class TestHandleEvalResult:
         assert len(logs) == 1
         assert "Malformed" in logs[0].message
 
+    def test_logs_invalid_data_types(self, client):
+        """Handler should log when data types are invalid."""
+        # Pass a non-convertible value for request_id
+        client._handle_eval_result("/mcp/eval/result", "not-an-int", 1, "output")
+
+        logs = client.get_logs(category="fail")
+        assert len(logs) == 1
+        assert "Invalid eval result data" in logs[0].message
+
     def test_handles_none_output(self, client):
         """Handler should handle None output gracefully."""
         import threading
