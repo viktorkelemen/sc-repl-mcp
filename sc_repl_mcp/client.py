@@ -107,7 +107,13 @@ class SCClient:
             msg = builder.build()
             self._reply_server.socket.sendto(msg.dgram, self._sclang_addr)
             return True
-        except Exception:
+        except OSError as e:
+            # Network/socket errors - sclang may not be listening
+            sys.stderr.write(f"[SC] Failed to send OSC to sclang: {e}\n")
+            return False
+        except Exception as e:
+            # Unexpected error - log with context for debugging
+            sys.stderr.write(f"[SC] Unexpected error sending to sclang: {type(e).__name__}: {e}\n")
             return False
 
     def _add_log(self, category: str, message: str):
@@ -256,19 +262,28 @@ class SCClient:
         Expected args: [request_id, success, output]
         """
         if len(args) < 3:
+            self._add_log("fail", f"Malformed eval result: expected 3 args, got {len(args)}")
             return
 
-        request_id = int(args[0])
-        success = bool(args[1])
-        output = str(args[2]) if args[2] is not None else ""
+        try:
+            request_id = int(args[0])
+            success = bool(args[1])
+            output = str(args[2]) if args[2] is not None else ""
+        except (ValueError, TypeError) as e:
+            self._add_log("fail", f"Invalid eval result data: {e}")
+            return
 
         with self._eval_request_lock:
-            # Store the result
-            self._eval_results[request_id] = (success, output)
-            # Signal the waiting thread
+            # Check if anyone is waiting for this result
             event = self._eval_events.get(request_id)
             if event:
+                # Store the result and signal the waiting thread
+                self._eval_results[request_id] = (success, output)
                 event.set()
+            else:
+                # Orphaned result - no one waiting (likely timed out)
+                # Don't store to prevent memory leak
+                pass
 
     def _start_sclang(self) -> tuple[bool, str]:
         """Start persistent sclang process for SynthDefs and OSC forwarding."""
@@ -804,6 +819,9 @@ class SCClient:
 
             # Send execution request to sclang
             if not self._send_to_sclang("/mcp/eval", [request_id, temp_path]):
+                # Clean up event on send failure
+                with self._eval_request_lock:
+                    self._eval_events.pop(request_id, None)
                 return False, "Failed to send code to sclang"
 
             # Wait for result

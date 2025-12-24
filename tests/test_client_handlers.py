@@ -1150,10 +1150,15 @@ class TestHandleEvalResult:
         assert success is False
         assert "Parse error" in output
 
-    def test_ignores_short_args(self, client):
-        """Handler should not crash with fewer than 3 args."""
-        # This should not raise
+    def test_logs_malformed_args(self, client):
+        """Handler should log malformed messages with fewer than 3 args."""
+        # This should not raise, but should log
         client._handle_eval_result("/mcp/eval/result", 42, 1)
+
+        # Verify it logged the error
+        logs = client.get_logs(category="fail")
+        assert len(logs) == 1
+        assert "Malformed" in logs[0].message
 
     def test_handles_none_output(self, client):
         """Handler should handle None output gracefully."""
@@ -1166,6 +1171,14 @@ class TestHandleEvalResult:
 
         success, output = client._eval_results[42]
         assert output == ""
+
+    def test_discards_orphaned_results(self, client):
+        """Handler should not store results when no one is waiting."""
+        # No event registered for this request ID
+        client._handle_eval_result("/mcp/eval/result", 999, 1, "orphaned")
+
+        # Result should not be stored (prevents memory leak)
+        assert 999 not in client._eval_results
 
 
 class TestIsSclangReady:
@@ -1227,3 +1240,64 @@ class TestEvalCode:
         success, message = client.eval_code("1 + 1")
         assert success is False
         assert "Not connected" in message
+
+    def test_successful_execution(self, client, mocker):
+        """Should execute code and return result when everything works."""
+        # Mock sclang as running
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        # Mock reply server
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Simulate result arriving when OSC is sent
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "42")
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        success, output = client.eval_code("1 + 1", timeout=1.0)
+
+        assert success is True
+        assert "42" in output
+
+    def test_timeout_returns_error_and_cleans_up(self, client, mocker):
+        """Should return timeout error and clean up internal state."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Don't simulate any response - let it timeout
+        success, message = client.eval_code("1+1", timeout=0.01)
+
+        assert success is False
+        assert "timed out" in message.lower()
+        # Verify cleanup
+        assert len(client._eval_events) == 0
+        assert len(client._eval_results) == 0
+
+    def test_cleans_up_event_on_send_failure(self, client, mocker):
+        """Should clean up event when send fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        mock_server.socket.sendto.side_effect = OSError("Network error")
+        client._reply_server = mock_server
+
+        success, message = client.eval_code("1+1")
+
+        assert success is False
+        assert "Failed to send" in message
+        # Verify event was cleaned up
+        assert len(client._eval_events) == 0
