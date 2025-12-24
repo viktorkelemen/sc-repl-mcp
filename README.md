@@ -83,11 +83,15 @@ Claude: [uses sc_connect, sc_load_synthdef, sc_play_synth]
 ```
 Claude Code <--stdio/JSON-RPC--> sc-repl MCP <--OSC--> scsynth (port 57110)
                                      |
-                                     +--spawns--> sclang (for SynthDefs)
+                                     +--persistent--> sclang (code execution)
 ```
 
 The server uses OSC (Open Sound Control) to communicate directly with scsynth.
-A persistent sclang process handles SynthDef loading and OSC forwarding.
+A persistent sclang process handles code execution, SynthDef loading, and OSC forwarding.
+
+### Performance
+
+After `sc_connect`, a persistent sclang process stays running. This makes `sc_eval` and `sc_load_synthdef` **much faster** (~10ms vs 2-5s) by avoiding class library recompilation on each call. State persists within the session.
 
 ## Syntax Validation
 

@@ -336,7 +336,7 @@ class TestScEval:
         from sc_repl_mcp.tools import sc_eval
         result = sc_eval(code="bad code")
 
-        assert "Error:" in result
+        assert "Error" in result
         assert "Parse error" in result
 
     def test_passes_timeout(self, mocker):
@@ -347,6 +347,31 @@ class TestScEval:
         sc_eval(code="test", timeout=60.0)
 
         mock_eval.assert_called_once_with("test", timeout=60.0)
+
+    def test_uses_persistent_sclang_when_ready(self, mocker):
+        """Should use persistent sclang when available."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = True
+        mock_client.eval_code.return_value = (True, "42")
+
+        from sc_repl_mcp.tools import sc_eval
+        result = sc_eval(code="1 + 1")
+
+        mock_client.eval_code.assert_called_once()
+        assert "persistent" in result
+
+    def test_falls_back_to_fresh_process_when_not_ready(self, mocker):
+        """Should spawn fresh process when persistent sclang not available."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
+        mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
+        mock_eval.return_value = (True, "42")
+
+        from sc_repl_mcp.tools import sc_eval
+        result = sc_eval(code="1 + 1")
+
+        mock_eval.assert_called_once()
+        assert "fresh process" in result
 
 
 class TestScGetLogs:

@@ -1106,3 +1106,207 @@ class TestReferenceComparisonEdgeCases:
 
         assert success is False
         assert "stale" in message.lower()
+
+
+class TestHandleEvalResult:
+    """Tests for _handle_eval_result handler for persistent sclang."""
+
+    def test_stores_result(self, client):
+        """Handler should store result for matching request ID."""
+        import threading
+
+        # Set up a pending request
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        client._handle_eval_result("/mcp/eval/result", 42, 1, "Success!")
+
+        assert 42 in client._eval_results
+        success, output = client._eval_results[42]
+        assert success is True
+        assert output == "Success!"
+
+    def test_signals_event(self, client):
+        """Handler should signal the waiting event."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        assert not event.is_set()
+        client._handle_eval_result("/mcp/eval/result", 42, 1, "Done")
+        assert event.is_set()
+
+    def test_handles_error_result(self, client):
+        """Handler should store error results correctly."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[99] = event
+
+        client._handle_eval_result("/mcp/eval/result", 99, 0, "ERROR: Parse error")
+
+        success, output = client._eval_results[99]
+        assert success is False
+        assert "Parse error" in output
+
+    def test_logs_malformed_args(self, client):
+        """Handler should log malformed messages with fewer than 3 args."""
+        # This should not raise, but should log
+        client._handle_eval_result("/mcp/eval/result", 42, 1)
+
+        # Verify it logged the error
+        logs = client.get_logs(category="fail")
+        assert len(logs) == 1
+        assert "Malformed" in logs[0].message
+
+    def test_logs_invalid_data_types(self, client):
+        """Handler should log when data types are invalid."""
+        # Pass a non-convertible value for request_id
+        client._handle_eval_result("/mcp/eval/result", "not-an-int", 1, "output")
+
+        logs = client.get_logs(category="fail")
+        assert len(logs) == 1
+        assert "Invalid eval result data" in logs[0].message
+
+    def test_handles_none_output(self, client):
+        """Handler should handle None output gracefully."""
+        import threading
+
+        event = threading.Event()
+        client._eval_events[42] = event
+
+        client._handle_eval_result("/mcp/eval/result", 42, 1, None)
+
+        success, output = client._eval_results[42]
+        assert output == ""
+
+    def test_discards_orphaned_results(self, client):
+        """Handler should not store results when no one is waiting."""
+        # No event registered for this request ID
+        client._handle_eval_result("/mcp/eval/result", 999, 1, "orphaned")
+
+        # Result should not be stored (prevents memory leak)
+        assert 999 not in client._eval_results
+
+
+class TestIsSclangReady:
+    """Tests for is_sclang_ready method."""
+
+    def test_returns_false_when_no_process(self, client):
+        """Should return False when no sclang process exists."""
+        client._sclang_process = None
+        assert client.is_sclang_ready() is False
+
+    def test_returns_false_when_process_exited(self, client, mocker):
+        """Should return False when sclang process has exited."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = 1  # Process exited with code 1
+        client._sclang_process = mock_proc
+
+        assert client.is_sclang_ready() is False
+
+    def test_returns_true_when_process_running(self, client, mocker):
+        """Should return True when sclang process is running."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None  # Process still running
+        client._sclang_process = mock_proc
+
+        assert client.is_sclang_ready() is True
+
+
+class TestEvalCode:
+    """Tests for eval_code method (persistent sclang execution)."""
+
+    def test_rejects_empty_code(self, client):
+        """Should reject empty code."""
+        success, message = client.eval_code("")
+        assert success is False
+        assert "No code provided" in message
+
+    def test_rejects_whitespace_only(self, client):
+        """Should reject whitespace-only code."""
+        success, message = client.eval_code("   \n\t  ")
+        assert success is False
+        assert "No code provided" in message
+
+    def test_requires_sclang_running(self, client):
+        """Should fail when sclang not running."""
+        client._sclang_process = None
+
+        success, message = client.eval_code("1 + 1")
+        assert success is False
+        assert "not running" in message.lower()
+
+    def test_requires_connection(self, client, mocker):
+        """Should fail when not connected."""
+        # Mock sclang as running
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._reply_server = None
+
+        success, message = client.eval_code("1 + 1")
+        assert success is False
+        assert "Not connected" in message
+
+    def test_successful_execution(self, client, mocker):
+        """Should execute code and return result when everything works."""
+        # Mock sclang as running
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        # Mock reply server
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Simulate result arriving when OSC is sent
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "42")
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        success, output = client.eval_code("1 + 1", timeout=1.0)
+
+        assert success is True
+        assert "42" in output
+
+    def test_timeout_returns_error_and_cleans_up(self, client, mocker):
+        """Should return timeout error and clean up internal state."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Don't simulate any response - let it timeout
+        success, message = client.eval_code("1+1", timeout=0.01)
+
+        assert success is False
+        assert "timed out" in message.lower()
+        # Verify cleanup
+        assert len(client._eval_events) == 0
+        assert len(client._eval_results) == 0
+
+    def test_cleans_up_event_on_send_failure(self, client, mocker):
+        """Should clean up event when send fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        mock_server.socket.sendto.side_effect = OSError("Network error")
+        client._reply_server = mock_server
+
+        success, message = client.eval_code("1+1")
+
+        assert success is False
+        assert "Failed to send" in message
+        # Verify event was cleaned up
+        assert len(client._eval_events) == 0
