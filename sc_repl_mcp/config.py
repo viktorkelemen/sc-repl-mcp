@@ -4,6 +4,7 @@
 SCSYNTH_HOST = "127.0.0.1"
 SCSYNTH_PORT = 57110
 REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed on connect)
+SCLANG_OSC_PORT = 57122  # Fixed port for MCP sclang (avoids conflict with IDE's sclang on 57120)
 
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
@@ -21,6 +22,10 @@ SCLANG_INIT_CODE = r'''
 Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", 57110));
 s = Server.default;
 // Server.remote handles connection automatically
+
+// Open dedicated OSC port for MCP communication (avoids conflict with IDE's sclang on 57120)
+thisProcess.openUDPPort(57122);
+"MCP sclang listening on OSC port 57122".postln;
 
 fork {
     0.5.wait;  // Give server connection time to establish
@@ -135,6 +140,7 @@ OSCFunc({ |msg|
 
 // Code execution responder - allows Python to execute SC code via OSC
 // This avoids spawning fresh sclang processes (which require class library recompilation)
+// Listen on port 57122 to avoid conflict with IDE's sclang
 OSCFunc({ |msg|
     var requestId = msg[1].asInteger;
     var filePath = msg[2].asString;
@@ -180,9 +186,9 @@ OSCFunc({ |msg|
             );
         };
     };
-}, '/mcp/eval');
+}, '/mcp/eval', recvPort: 57122);
 
-"MCP sclang ready with OSC forwarding and code execution on port 57130".postln;
+"MCP sclang ready with OSC forwarding and code execution on port 57122".postln;
 
 // Keep sclang running indefinitely
 { inf.wait }.defer;

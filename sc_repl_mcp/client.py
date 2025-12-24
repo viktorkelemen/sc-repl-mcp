@@ -16,6 +16,7 @@ from .config import (
     SCSYNTH_HOST,
     SCSYNTH_PORT,
     REPLY_PORT,
+    SCLANG_OSC_PORT,
     SCLANG_INIT_CODE,
     SPECTRUM_BAND_FREQUENCIES,
 )
@@ -41,8 +42,8 @@ class SCClient:
         self._node_id = 1_000_000 + (int(time.time() * 1000) & 0xFFFFF) * 1000
         self._node_lock = threading.Lock()
         self._scsynth_addr = (SCSYNTH_HOST, SCSYNTH_PORT)
-        # sclang address for code execution (same host, default sclang port)
-        self._sclang_addr = (SCSYNTH_HOST, 57120)
+        # sclang address for code execution (dedicated MCP port, not IDE's 57120)
+        self._sclang_addr = (SCSYNTH_HOST, SCLANG_OSC_PORT)
 
         # Audio analysis state
         self._analyzer_node_id: Optional[int] = None
