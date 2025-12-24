@@ -77,6 +77,11 @@ class SCClient:
         self._eval_results: dict[int, tuple[bool, str]] = {}  # request_id -> (success, output)
         self._eval_events: dict[int, threading.Event] = {}  # request_id -> event
 
+        # Recording state
+        self._is_recording = False
+        self._recording_path: Optional[str] = None
+        self._recording_lock = threading.Lock()
+
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
 
@@ -743,6 +748,9 @@ class SCClient:
 
     def disconnect(self):
         """Disconnect from server and stop sclang."""
+        # Stop recording if in progress to avoid corrupted files
+        if self._is_recording:
+            self.stop_recording()
         self._stop_sclang()
         if self._reply_server:
             self._reply_server.shutdown()
@@ -1194,3 +1202,140 @@ class SCClient:
                 time.sleep(remaining + 0.1)
 
         return True, f"Analyzed {len(results)} values", results
+
+    # Audio recording methods
+
+    def start_recording(
+        self,
+        path: Optional[str] = None,
+        duration: Optional[float] = None,
+        header_format: str = "wav",
+        sample_format: str = "int24",
+        channels: int = 2,
+    ) -> tuple[bool, str]:
+        """Start recording server output to an audio file.
+
+        Args:
+            path: Output file path. If None, uses SuperCollider's default
+                  (~/Music/SuperCollider Recordings/SC_<timestamp>.<format>)
+            duration: Optional auto-stop duration in seconds
+            header_format: File format - "wav", "aiff", "caf" (default: wav)
+            sample_format: Sample format - "int16", "int24", "float" (default: int24)
+            channels: Number of channels to record (default: 2)
+
+        Returns:
+            (success, message) tuple
+        """
+        if not self.is_sclang_ready():
+            return False, "Not connected. Call sc_connect first."
+
+        with self._recording_lock:
+            if self._is_recording:
+                return False, f"Already recording to: {self._recording_path}"
+
+        # Validate parameters
+        valid_header_formats = ["wav", "aiff", "caf", "w64", "rf64"]
+        if header_format not in valid_header_formats:
+            return False, f"Invalid header format '{header_format}'. Use: {', '.join(valid_header_formats)}"
+
+        valid_sample_formats = ["int16", "int24", "int32", "float"]
+        if sample_format not in valid_sample_formats:
+            return False, f"Invalid sample format '{sample_format}'. Use: {', '.join(valid_sample_formats)}"
+
+        if channels < 1 or channels > 32:
+            return False, f"Channels must be between 1 and 32, got {channels}"
+
+        if duration is not None and duration <= 0:
+            return False, f"Duration must be positive, got {duration}"
+
+        # Build sclang code to start recording
+        # Escape path for SuperCollider string if provided
+        if path:
+            # Expand ~ and make absolute
+            expanded_path = os.path.expanduser(path)
+            if not os.path.isabs(expanded_path):
+                expanded_path = os.path.abspath(expanded_path)
+            # Escape backslashes and quotes for SC string
+            escaped_path = expanded_path.replace("\\", "\\\\").replace('"', '\\"')
+            path_arg = f'"{escaped_path}"'
+        else:
+            path_arg = "nil"
+
+        code = f"""
+s.recChannels = {channels};
+s.recHeaderFormat = "{header_format}";
+s.recSampleFormat = "{sample_format}";
+s.record({path_arg});
+s.recorder.path;
+"""
+
+        success, output = self.eval_code(code, timeout=10.0)
+        if not success:
+            return False, f"Failed to start recording: {output}"
+
+        # Extract the actual recording path from sclang output
+        # The last line of output should be the path
+        actual_path = output.strip().split("\n")[-1].strip()
+
+        with self._recording_lock:
+            self._is_recording = True
+            self._recording_path = actual_path
+
+        # Schedule auto-stop if duration specified
+        if duration is not None:
+            def auto_stop():
+                time.sleep(duration)
+                self.stop_recording()
+
+            threading.Thread(target=auto_stop, daemon=True).start()
+            return True, f"Recording started: {actual_path} (auto-stop in {duration}s)"
+
+        return True, f"Recording started: {actual_path}"
+
+    def stop_recording(self) -> tuple[bool, str]:
+        """Stop recording and finalize the audio file.
+
+        Returns:
+            (success, message) tuple with the path to the recorded file.
+        """
+        with self._recording_lock:
+            if not self._is_recording:
+                return False, "Not currently recording"
+            recording_path = self._recording_path
+
+        if not self.is_sclang_ready():
+            # Clear state even if we can't stop properly
+            with self._recording_lock:
+                self._is_recording = False
+                self._recording_path = None
+            return False, "sclang not available. Recording state cleared but file may be incomplete."
+
+        code = "s.stopRecording;"
+        success, output = self.eval_code(code, timeout=10.0)
+
+        with self._recording_lock:
+            self._is_recording = False
+            self._recording_path = None
+
+        if not success:
+            return False, f"Error stopping recording: {output}. File may be incomplete: {recording_path}"
+
+        return True, f"Recording saved: {recording_path}"
+
+    def is_recording(self) -> bool:
+        """Check if currently recording.
+
+        Returns:
+            True if recording is in progress, False otherwise.
+        """
+        with self._recording_lock:
+            return self._is_recording
+
+    def get_recording_path(self) -> Optional[str]:
+        """Get the path to the current recording.
+
+        Returns:
+            Path string if recording, None otherwise.
+        """
+        with self._recording_lock:
+            return self._recording_path

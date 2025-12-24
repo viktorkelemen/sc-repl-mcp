@@ -587,6 +587,58 @@ def sc_analyze_parameter(
     return "\n".join(lines)
 
 
+# Audio recording tools
+
+@mcp.tool()
+def sc_start_recording(
+    path: Optional[str] = None,
+    duration: Optional[float] = None,
+    format: str = "wav",
+    sample_format: str = "int24",
+    channels: int = 2,
+) -> str:
+    """Start recording server output to an audio file.
+
+    Records the main output of the SuperCollider server to a file on disk.
+    Use sc_stop_recording to stop and save the file.
+
+    Args:
+        path: Output file path. If not provided, saves to
+              ~/Music/SuperCollider Recordings/SC_<timestamp>.<format>
+        duration: Optional auto-stop duration in seconds. If provided,
+                  recording stops automatically after this time.
+        format: Audio file format - "wav", "aiff", "caf", "w64", "rf64" (default: wav)
+        sample_format: Bit depth - "int16", "int24", "int32", "float" (default: int24)
+        channels: Number of channels to record, 1-32 (default: 2 for stereo)
+
+    Example:
+        sc_start_recording()  # Records to default location
+        sc_start_recording(path="~/my_recording.wav", duration=10.0)  # 10 second recording
+        sc_start_recording(format="aiff", sample_format="int24")  # High quality AIFF
+    """
+    _, message = sc_client.start_recording(
+        path=path,
+        duration=duration,
+        header_format=format,
+        sample_format=sample_format,
+        channels=channels,
+    )
+    return message
+
+
+@mcp.tool()
+def sc_stop_recording() -> str:
+    """Stop recording and save the audio file.
+
+    Stops the current recording and finalizes the audio file.
+    The file header is updated with the correct length.
+
+    Returns the path to the saved recording.
+    """
+    _, message = sc_client.stop_recording()
+    return message
+
+
 # Syntax validation tool
 
 @mcp.tool()
