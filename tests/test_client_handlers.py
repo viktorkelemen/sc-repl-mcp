@@ -1428,12 +1428,8 @@ class TestRecording:
         mock_server.socket = mocker.MagicMock()
         client._reply_server = mock_server
 
-        # Capture the code that was sent
-        sent_code = []
-
         def simulate_response(dgram, addr):
             request_id = client._eval_request_id
-            # Just simulate success
             client._handle_eval_result(
                 "/mcp/eval/result",
                 request_id,
@@ -1446,6 +1442,96 @@ class TestRecording:
         success, _ = client.start_recording(path="~/my_recording.wav")
 
         assert success is True
+
+    def test_start_recording_reverts_state_on_eval_failure(self, client, mocker):
+        """Should revert recording state if eval_code fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_failure(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                0,  # Failure
+                "ERROR: Server not running"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_failure
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Failed to start recording" in message
+        # State should be reverted
+        assert client._is_recording is False
+        assert client._recording_path is None
+
+    def test_start_recording_validates_path_extraction(self, client, mocker):
+        """Should fail if path extraction returns garbage."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_bad_output(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "WARNING: Something went wrong"  # No valid path
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_bad_output
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Could not determine recording path" in message
+        # State should be reverted
+        assert client._is_recording is False
+
+    def test_start_recording_increments_session_id(self, client, mocker):
+        """Should increment session ID for each recording."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        initial_session_id = client._recording_session_id
+
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "/tmp/recording1.wav"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        client.start_recording()
+        first_session = client._recording_session_id
+        assert first_session == initial_session_id + 1
+
+        # Stop and start another
+        client._is_recording = False
+        client.start_recording()
+        second_session = client._recording_session_id
+        assert second_session == first_session + 1
 
     def test_stop_recording_when_not_recording(self, client):
         """Should fail when not currently recording."""
@@ -1536,3 +1622,125 @@ class TestRecording:
         client.disconnect()
 
         assert client._is_recording is False
+
+    def test_disconnect_logs_stop_failure(self, client, mocker):
+        """Disconnect should log failure if stop_recording fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        client._is_recording = True
+        client._recording_path = "/tmp/test.wav"
+
+        def simulate_failure(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 0, "ERROR: timeout")
+
+        mock_server.socket.sendto.side_effect = simulate_failure
+
+        client.disconnect()
+
+        # Should have logged the failure
+        logs = client.get_logs(category="fail")
+        assert len(logs) >= 1
+        assert any("Failed to stop recording during disconnect" in log.message for log in logs)
+
+    def test_auto_stop_respects_session_id(self, client, mocker):
+        """Auto-stop should not stop a different recording session."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Start recording with duration
+        call_count = [0]
+
+        def simulate_response(dgram, addr):
+            call_count[0] += 1
+            request_id = client._eval_request_id
+            if call_count[0] == 1:
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/first.wav"
+                )
+            else:
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/second.wav"
+                )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        # Mock sleep to return immediately
+        mocker.patch('time.sleep')
+
+        # Start first recording with auto-stop
+        success, _ = client.start_recording(duration=1.0)
+        assert success is True
+        first_session = client._recording_session_id
+
+        # Manually stop before auto-stop fires
+        client._is_recording = False
+        client._recording_path = None
+
+        # Start second recording (different session)
+        success, _ = client.start_recording()
+        assert success is True
+        second_session = client._recording_session_id
+        assert second_session != first_session
+
+        # Second recording should still be active
+        # (auto-stop from first should have checked session ID and aborted)
+        assert client._is_recording is True
+        assert client._recording_path == "/tmp/second.wav"
+
+    def test_auto_stop_logs_failure(self, client, mocker):
+        """Auto-stop should log failure if stop_recording fails."""
+        import time
+
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        call_count = [0]
+
+        def simulate_response(dgram, addr):
+            call_count[0] += 1
+            request_id = client._eval_request_id
+            if call_count[0] == 1:
+                # First call (start recording) succeeds
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/test.wav"
+                )
+            else:
+                # Second call (stop recording) fails
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 0, "ERROR: timeout"
+                )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        # Start recording with very short duration
+        success, _ = client.start_recording(duration=0.001)
+        assert success is True
+
+        # Poll for the log entry with timeout (auto-stop thread needs time to complete)
+        deadline = time.time() + 1.0
+        found_log = False
+        while time.time() < deadline:
+            logs = client.get_logs(category="fail")
+            if any("Auto-stop recording failed" in log.message for log in logs):
+                found_log = True
+                break
+            time.sleep(0.01)
+
+        assert found_log, "Expected 'Auto-stop recording failed' log entry"

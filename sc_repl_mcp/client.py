@@ -80,6 +80,7 @@ class SCClient:
         # Recording state
         self._is_recording = False
         self._recording_path: Optional[str] = None
+        self._recording_session_id: int = 0  # Tracks current recording session for auto-stop
         self._recording_lock = threading.Lock()
 
     def _send_message(self, address: str, args: list) -> bool:
@@ -749,8 +750,14 @@ class SCClient:
     def disconnect(self):
         """Disconnect from server and stop sclang."""
         # Stop recording if in progress to avoid corrupted files
-        if self._is_recording:
-            self.stop_recording()
+        if self.is_recording():
+            success, message = self.stop_recording()
+            if not success:
+                self._add_log(
+                    "fail",
+                    f"Failed to stop recording during disconnect: {message}. "
+                    f"Recording file may be incomplete."
+                )
         self._stop_sclang()
         if self._reply_server:
             self._reply_server.shutdown()
@@ -1229,11 +1236,7 @@ class SCClient:
         if not self.is_sclang_ready():
             return False, "Not connected. Call sc_connect first."
 
-        with self._recording_lock:
-            if self._is_recording:
-                return False, f"Already recording to: {self._recording_path}"
-
-        # Validate parameters
+        # Validate parameters before acquiring lock
         valid_header_formats = ["wav", "aiff", "caf", "w64", "rf64"]
         if header_format not in valid_header_formats:
             return False, f"Invalid header format '{header_format}'. Use: {', '.join(valid_header_formats)}"
@@ -1247,6 +1250,15 @@ class SCClient:
 
         if duration is not None and duration <= 0:
             return False, f"Duration must be positive, got {duration}"
+
+        # Acquire lock and set recording state atomically to prevent TOCTOU race
+        with self._recording_lock:
+            if self._is_recording:
+                return False, f"Already recording to: {self._recording_path}"
+            # Mark as recording immediately to prevent concurrent start attempts
+            self._is_recording = True
+            self._recording_session_id += 1
+            session_id = self._recording_session_id
 
         # Build sclang code to start recording
         # Escape path for SuperCollider string if provided
@@ -1271,23 +1283,41 @@ s.recorder.path;
 
         success, output = self.eval_code(code, timeout=10.0)
         if not success:
+            # Revert recording state on failure
+            with self._recording_lock:
+                self._is_recording = False
+                self._recording_path = None
             return False, f"Failed to start recording: {output}"
 
         # Extract the actual recording path from sclang output
         # The last line of output should be the path
         actual_path = output.strip().split("\n")[-1].strip()
 
+        # Validate extracted path
+        if not actual_path or actual_path.startswith("ERROR") or actual_path.startswith("WARNING"):
+            with self._recording_lock:
+                self._is_recording = False
+                self._recording_path = None
+            return False, f"Could not determine recording path from sclang output: {output[:200]}"
+
         with self._recording_lock:
-            self._is_recording = True
             self._recording_path = actual_path
 
         # Schedule auto-stop if duration specified
         if duration is not None:
-            def auto_stop():
+            def auto_stop(expected_session_id: int):
                 time.sleep(duration)
-                self.stop_recording()
+                # Check if this is still the same recording session
+                with self._recording_lock:
+                    if self._recording_session_id != expected_session_id:
+                        return  # Different recording or stopped, abort
+                    if not self._is_recording:
+                        return  # Already stopped
+                success, message = self.stop_recording()
+                if not success:
+                    self._add_log("fail", f"Auto-stop recording failed: {message}")
 
-            threading.Thread(target=auto_stop, daemon=True).start()
+            threading.Thread(target=auto_stop, args=(session_id,), daemon=True).start()
             return True, f"Recording started: {actual_path} (auto-stop in {duration}s)"
 
         return True, f"Recording started: {actual_path}"
