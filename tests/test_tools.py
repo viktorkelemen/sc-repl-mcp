@@ -305,6 +305,18 @@ class TestScLoadSynthdef:
         assert "writeDefFile" in code
         assert "d_load" in code
 
+    def test_uses_persistent_sclang_when_ready(self, mocker):
+        """Should use persistent sclang when available."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = True
+        mock_client.eval_code.return_value = (True, "SynthDef 'test' loaded")
+
+        from sc_repl_mcp.tools import sc_load_synthdef
+        result = sc_load_synthdef(name="test", code="Out.ar(0, SinOsc.ar(440));")
+
+        mock_client.eval_code.assert_called_once()
+        assert result == "SynthDef 'test' loaded successfully"
+
     def test_returns_error_on_failure(self, mocker):
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (False, "ERROR: syntax error")
@@ -320,6 +332,9 @@ class TestScEval:
     """Tests for sc_eval tool."""
 
     def test_returns_success_output(self, mocker):
+        """Should format successful output correctly (via fresh process)."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (True, "Result: 42")
 
@@ -328,8 +343,12 @@ class TestScEval:
 
         assert "Executed successfully" in result
         assert "42" in result
+        assert "fresh process" in result
 
     def test_returns_error_output(self, mocker):
+        """Should format error output correctly (via fresh process)."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (False, "ERROR: Parse error")
 
@@ -340,6 +359,9 @@ class TestScEval:
         assert "Parse error" in result
 
     def test_passes_timeout(self, mocker):
+        """Should pass timeout to eval_sclang."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (True, "")
 
@@ -504,3 +526,436 @@ class TestScStopRecording:
         result = sc_stop_recording()
 
         assert "Not currently recording" in result
+
+
+class TestScCaptureReference:
+    """Tests for sc_capture_reference tool."""
+
+    def test_captures_reference(self, mock_sc_client):
+        mock_sc_client.capture_reference.return_value = (
+            True, "Reference 'target' captured"
+        )
+
+        from sc_repl_mcp.tools import sc_capture_reference
+        result = sc_capture_reference(name="target", description="bright bell")
+
+        mock_sc_client.capture_reference.assert_called_once_with(
+            name="target", description="bright bell"
+        )
+        assert "Reference 'target' captured" in result
+
+    def test_returns_error_when_analyzer_not_running(self, mock_sc_client):
+        mock_sc_client.capture_reference.return_value = (
+            False, "Analyzer not running"
+        )
+
+        from sc_repl_mcp.tools import sc_capture_reference
+        result = sc_capture_reference(name="test")
+
+        assert "Analyzer not running" in result
+
+
+class TestScCompareToReference:
+    """Tests for sc_compare_to_reference tool."""
+
+    def test_formats_comparison_matched(self, mock_sc_client):
+        """Should format comparison when sounds match well."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "target", "description": "bright bell"},
+                "pitch": {
+                    "valid": True, "diff_semitones": 0.0,
+                    "current_freq": 440.0, "reference_freq": 440.0, "score": 100.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": 1.0,
+                    "current_centroid": 880.0, "reference_centroid": 880.0, "score": 100.0
+                },
+                "loudness": {
+                    "diff_sones": 0.0,
+                    "current_sones": 10.0, "reference_sones": 10.0, "score": 100.0
+                },
+                "character": {
+                    "diff": 0.0,
+                    "current_flatness": 0.1, "reference_flatness": 0.1, "score": 100.0
+                },
+                "amplitude": {"diff_db": 0.0},
+                "overall_score": 100.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="target")
+
+        assert "Comparison to 'target'" in result
+        assert "bright bell" in result
+        assert "Overall Match: 100%" in result
+        assert "Pitch: matched" in result
+        assert "Brightness: matched" in result
+        assert "Loudness: matched" in result
+        assert "Character: matched" in result
+
+    def test_formats_comparison_sharper_brighter(self, mock_sc_client):
+        """Should format when current sound is sharper and brighter."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": True, "diff_semitones": 2.5,
+                    "current_freq": 523.0, "reference_freq": 440.0, "score": 75.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": 1.5,
+                    "current_centroid": 1320.0, "reference_centroid": 880.0, "score": 70.0
+                },
+                "loudness": {
+                    "diff_sones": 5.0,
+                    "current_sones": 15.0, "reference_sones": 10.0, "score": 60.0
+                },
+                "character": {
+                    "diff": 0.2,
+                    "current_flatness": 0.3, "reference_flatness": 0.1, "score": 80.0
+                },
+                "amplitude": {"diff_db": 3.0},
+                "overall_score": 71.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "+2.5 semitones (sharper)" in result
+        assert "50% brighter" in result
+        assert "+5.0 sones (louder)" in result
+        assert "more noise-like" in result
+        assert "Overall Match: 71%" in result
+
+    def test_formats_comparison_flatter_darker(self, mock_sc_client):
+        """Should format when current sound is flatter and darker."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": True, "diff_semitones": -3.0,
+                    "current_freq": 370.0, "reference_freq": 440.0, "score": 70.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": 0.5,
+                    "current_centroid": 440.0, "reference_centroid": 880.0, "score": 65.0
+                },
+                "loudness": {
+                    "diff_sones": -3.0,
+                    "current_sones": 7.0, "reference_sones": 10.0, "score": 70.0
+                },
+                "character": {
+                    "diff": -0.2,
+                    "current_flatness": 0.05, "reference_flatness": 0.25, "score": 80.0
+                },
+                "amplitude": {"diff_db": -6.0},
+                "overall_score": 71.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "-3.0 semitones (flatter)" in result
+        assert "50% darker" in result
+        assert "-3.0 sones (quieter)" in result
+        assert "more tonal" in result
+
+    def test_handles_invalid_pitch(self, mock_sc_client):
+        """Should handle case when pitch detection fails."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": False, "diff_semitones": 0.0,
+                    "current_freq": 0.0, "reference_freq": 440.0, "score": 0.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": 1.0,
+                    "current_centroid": 880.0, "reference_centroid": 880.0, "score": 100.0
+                },
+                "loudness": {
+                    "diff_sones": 0.0,
+                    "current_sones": 10.0, "reference_sones": 10.0, "score": 100.0
+                },
+                "character": {
+                    "diff": 0.0,
+                    "current_flatness": 0.1, "reference_flatness": 0.1, "score": 100.0
+                },
+                "amplitude": {"diff_db": 0.0},
+                "overall_score": 75.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "N/A (one or both sounds silent)" in result
+
+    def test_handles_invalid_brightness(self, mock_sc_client):
+        """Should handle case when spectral analysis fails."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": True, "diff_semitones": 0.0,
+                    "current_freq": 440.0, "reference_freq": 440.0, "score": 100.0
+                },
+                "brightness": {
+                    "valid": False, "ratio": None,
+                    "current_centroid": 0.0, "reference_centroid": 880.0, "score": 0.0
+                },
+                "loudness": {
+                    "diff_sones": 0.0,
+                    "current_sones": 10.0, "reference_sones": 10.0, "score": 100.0
+                },
+                "character": {
+                    "diff": 0.0,
+                    "current_flatness": 0.1, "reference_flatness": 0.1, "score": 100.0
+                },
+                "amplitude": {"diff_db": 0.0},
+                "overall_score": 75.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "N/A" in result
+
+    def test_handles_null_brightness_ratio(self, mock_sc_client):
+        """Should handle case when brightness ratio is None but valid is True."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": True, "diff_semitones": 0.0,
+                    "current_freq": 440.0, "reference_freq": 440.0, "score": 100.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": None,
+                    "current_centroid": 0.0, "reference_centroid": 0.0, "score": 0.0
+                },
+                "loudness": {
+                    "diff_sones": 0.0,
+                    "current_sones": 10.0, "reference_sones": 10.0, "score": 100.0
+                },
+                "character": {
+                    "diff": 0.0,
+                    "current_flatness": 0.1, "reference_flatness": 0.1, "score": 100.0
+                },
+                "amplitude": {"diff_db": 0.0},
+                "overall_score": 75.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "Brightness: N/A" in result
+
+    def test_returns_error_when_reference_not_found(self, mock_sc_client):
+        mock_sc_client.compare_to_reference.return_value = (
+            False, "Reference 'unknown' not found", None
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="unknown")
+
+        assert "Reference 'unknown' not found" in result
+
+
+class TestScListReferences:
+    """Tests for sc_list_references tool."""
+
+    def test_formats_references_list(self, mock_sc_client):
+        from sc_repl_mcp.types import ReferenceSnapshot, AnalysisData
+
+        mock_sc_client.list_references.return_value = [
+            ReferenceSnapshot(
+                name="bell",
+                description="bright metallic",
+                timestamp=1700000000.0,
+                analysis=AnalysisData(
+                    freq=440.0, has_freq=True,
+                    centroid=880.0, flatness=0.1, rolloff=4000.0,
+                    peak_l=0.5, peak_r=0.5, rms_l=0.2, rms_r=0.2,
+                    loudness_sones=10.0
+                )
+            ),
+            ReferenceSnapshot(
+                name="pad",
+                description="",
+                timestamp=1700000100.0,
+                analysis=AnalysisData(
+                    freq=220.0, has_freq=True,
+                    centroid=440.0, flatness=0.05, rolloff=2000.0,
+                    peak_l=0.3, peak_r=0.3, rms_l=0.1, rms_r=0.1,
+                    loudness_sones=5.0
+                )
+            ),
+        ]
+
+        from sc_repl_mcp.tools import sc_list_references
+        result = sc_list_references()
+
+        assert "Captured References (2)" in result
+        assert "'bell'" in result
+        assert "bright metallic" in result
+        assert "'pad'" in result
+        assert "A4" in result  # Note for 440 Hz
+        assert "A3" in result  # Note for 220 Hz
+        assert "sones" in result
+
+    def test_returns_empty_message(self, mock_sc_client):
+        mock_sc_client.list_references.return_value = []
+
+        from sc_repl_mcp.tools import sc_list_references
+        result = sc_list_references()
+
+        assert "No references captured" in result
+
+
+class TestScDeleteReference:
+    """Tests for sc_delete_reference tool."""
+
+    def test_deletes_reference(self, mock_sc_client):
+        mock_sc_client.delete_reference.return_value = (
+            True, "Reference 'test' deleted"
+        )
+
+        from sc_repl_mcp.tools import sc_delete_reference
+        result = sc_delete_reference(name="test")
+
+        mock_sc_client.delete_reference.assert_called_once_with("test")
+        assert "Reference 'test' deleted" in result
+
+    def test_returns_error_when_not_found(self, mock_sc_client):
+        mock_sc_client.delete_reference.return_value = (
+            False, "Reference 'unknown' not found"
+        )
+
+        from sc_repl_mcp.tools import sc_delete_reference
+        result = sc_delete_reference(name="unknown")
+
+        assert "Reference 'unknown' not found" in result
+
+
+class TestScAnalyzeParameter:
+    """Tests for sc_analyze_parameter tool."""
+
+    def test_formats_analysis_results(self, mock_sc_client):
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            True, "Analysis complete", [
+                {"value": 500.0, "metric": 800.0},
+                {"value": 1000.0, "metric": 1200.0},
+                {"value": 2000.0, "metric": 2000.0},
+                {"value": 4000.0, "metric": 3500.0},
+            ]
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="filter",
+            param="cutoff",
+            values=[500, 1000, 2000, 4000],
+            metric="centroid",
+            base_params={"amp": 0.2}
+        )
+
+        mock_sc_client.analyze_parameter_impact.assert_called_once_with(
+            synthdef="filter",
+            param="cutoff",
+            values=[500, 1000, 2000, 4000],
+            metric="centroid",
+            base_params={"amp": 0.2}
+        )
+
+        assert "Parameter Impact Analysis: cutoff → centroid" in result
+        assert "SynthDef: filter" in result
+        assert "500.00" in result
+        assert "4000.00" in result
+        assert "Range:" in result
+        assert "Trend:" in result
+        assert "cutoff ↑ causes centroid ↑" in result
+
+    def test_formats_inverse_correlation(self, mock_sc_client):
+        """Should detect when parameter increase causes metric decrease."""
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            True, "Analysis complete", [
+                {"value": 0.1, "metric": 2000.0},
+                {"value": 0.5, "metric": 1000.0},
+                {"value": 1.0, "metric": 500.0},
+            ]
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="synth", param="damping", values=[0.1, 0.5, 1.0]
+        )
+
+        assert "damping ↑ causes centroid ↓" in result
+
+    def test_formats_no_correlation(self, mock_sc_client):
+        """Should detect when parameter has minimal effect."""
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            True, "Analysis complete", [
+                {"value": 100.0, "metric": 1000.0},
+                {"value": 200.0, "metric": 1005.0},
+                {"value": 300.0, "metric": 995.0},
+            ]
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="synth", param="mix", values=[100, 200, 300]
+        )
+
+        assert "mix has minimal effect on centroid" in result
+
+    def test_handles_na_metrics(self, mock_sc_client):
+        """Should handle N/A metric values."""
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            True, "Analysis complete", [
+                {"value": 100.0, "metric": None},
+                {"value": 200.0, "metric": 1000.0},
+                {"value": 300.0, "metric": 2000.0},
+                {"value": 400.0, "metric": None},
+            ]
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="synth", param="freq", values=[100, 200, 300, 400]
+        )
+
+        assert "N/A" in result
+        # Should still show range for valid results
+        assert "1000.0000 to 2000.0000" in result
+
+    def test_returns_error_on_failure(self, mock_sc_client):
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            False, "SynthDef 'unknown' not found", None
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="unknown", param="freq", values=[100, 200]
+        )
+
+        assert "SynthDef 'unknown' not found" in result
+
+    def test_returns_no_results_message(self, mock_sc_client):
+        mock_sc_client.analyze_parameter_impact.return_value = (
+            True, "Analysis complete", []
+        )
+
+        from sc_repl_mcp.tools import sc_analyze_parameter
+        result = sc_analyze_parameter(
+            synthdef="synth", param="freq", values=[]
+        )
+
+        assert "No results collected" in result
