@@ -305,6 +305,18 @@ class TestScLoadSynthdef:
         assert "writeDefFile" in code
         assert "d_load" in code
 
+    def test_uses_persistent_sclang_when_ready(self, mocker):
+        """Should use persistent sclang when available."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = True
+        mock_client.eval_code.return_value = (True, "SynthDef 'test' loaded")
+
+        from sc_repl_mcp.tools import sc_load_synthdef
+        result = sc_load_synthdef(name="test", code="Out.ar(0, SinOsc.ar(440));")
+
+        mock_client.eval_code.assert_called_once()
+        assert result == "SynthDef 'test' loaded successfully"
+
     def test_returns_error_on_failure(self, mocker):
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (False, "ERROR: syntax error")
@@ -320,6 +332,9 @@ class TestScEval:
     """Tests for sc_eval tool."""
 
     def test_returns_success_output(self, mocker):
+        """Should format successful output correctly (via fresh process)."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (True, "Result: 42")
 
@@ -328,8 +343,12 @@ class TestScEval:
 
         assert "Executed successfully" in result
         assert "42" in result
+        assert "fresh process" in result
 
     def test_returns_error_output(self, mocker):
+        """Should format error output correctly (via fresh process)."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (False, "ERROR: Parse error")
 
@@ -340,6 +359,9 @@ class TestScEval:
         assert "Parse error" in result
 
     def test_passes_timeout(self, mocker):
+        """Should pass timeout to eval_sclang."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (True, "")
 
@@ -703,6 +725,37 @@ class TestScCompareToReference:
         result = sc_compare_to_reference(name="ref")
 
         assert "N/A" in result
+
+    def test_handles_null_brightness_ratio(self, mock_sc_client):
+        """Should handle case when brightness ratio is None but valid is True."""
+        mock_sc_client.compare_to_reference.return_value = (
+            True, "Comparison complete", {
+                "reference": {"name": "ref", "description": ""},
+                "pitch": {
+                    "valid": True, "diff_semitones": 0.0,
+                    "current_freq": 440.0, "reference_freq": 440.0, "score": 100.0
+                },
+                "brightness": {
+                    "valid": True, "ratio": None,
+                    "current_centroid": 0.0, "reference_centroid": 0.0, "score": 0.0
+                },
+                "loudness": {
+                    "diff_sones": 0.0,
+                    "current_sones": 10.0, "reference_sones": 10.0, "score": 100.0
+                },
+                "character": {
+                    "diff": 0.0,
+                    "current_flatness": 0.1, "reference_flatness": 0.1, "score": 100.0
+                },
+                "amplitude": {"diff_db": 0.0},
+                "overall_score": 75.0
+            }
+        )
+
+        from sc_repl_mcp.tools import sc_compare_to_reference
+        result = sc_compare_to_reference(name="ref")
+
+        assert "Brightness: N/A" in result
 
     def test_returns_error_when_reference_not_found(self, mock_sc_client):
         mock_sc_client.compare_to_reference.return_value = (

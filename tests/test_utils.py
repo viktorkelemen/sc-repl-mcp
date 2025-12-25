@@ -2,6 +2,7 @@
 
 import math
 import os
+import signal
 import subprocess
 import pytest
 
@@ -185,13 +186,13 @@ class TestKillProcessOnPort:
             stdout="12345\n"
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
         mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
 
         result = kill_process_on_port(57130)
 
         assert result is True
-        mock_kill.assert_called_once_with(12345, mocker.ANY)
+        mock_kill.assert_called_once_with(12345, signal.SIGTERM)
         mock_sleep.assert_called_once_with(0.1)
 
     def test_skips_own_process(self, mocker):
@@ -203,7 +204,7 @@ class TestKillProcessOnPort:
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
         # Return same PID as in lsof output
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=12345)
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=12345)
 
         result = kill_process_on_port(57130)
 
@@ -218,8 +219,8 @@ class TestKillProcessOnPort:
             stdout="12345\n12346\n12347\n"
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
-        mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mocker.patch("sc_repl_mcp.utils.time.sleep")
 
         result = kill_process_on_port(57130)
 
@@ -234,14 +235,14 @@ class TestKillProcessOnPort:
             stdout="not_a_pid\n12345\n"
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
-        mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mocker.patch("sc_repl_mcp.utils.time.sleep")
 
         result = kill_process_on_port(57130)
 
         assert result is True
         # Should only kill the valid PID
-        mock_kill.assert_called_once_with(12345, mocker.ANY)
+        mock_kill.assert_called_once_with(12345, signal.SIGTERM)
 
     def test_handles_process_not_found(self, mocker):
         """Should handle ProcessLookupError gracefully."""
@@ -252,7 +253,7 @@ class TestKillProcessOnPort:
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
         mock_kill.side_effect = ProcessLookupError("No such process")
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
 
         result = kill_process_on_port(57130)
 
@@ -267,7 +268,7 @@ class TestKillProcessOnPort:
         )
         mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
         mock_kill.side_effect = PermissionError("Operation not permitted")
-        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
 
         result = kill_process_on_port(57130)
 
