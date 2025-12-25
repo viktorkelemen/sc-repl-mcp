@@ -83,6 +83,13 @@ class SCClient:
         self._recording_session_id: int = 0  # Tracks current recording session for auto-stop
         self._recording_lock = threading.Lock()
 
+        # Connection stability
+        self._last_sclang_ping: float = 0.0  # Timestamp of last successful sclang response
+        self._sclang_ping_interval: float = 30.0  # How often to check sclang health (seconds)
+        self._auto_reconnect_enabled: bool = True  # Whether to auto-reconnect on failure
+        self._reconnect_lock = threading.Lock()  # Prevent concurrent reconnection attempts
+        self._consecutive_failures: int = 0  # Track consecutive failures for backoff
+
     def _send_message(self, address: str, args: list) -> bool:
         """Send an OSC message to scsynth using the reply server's socket.
 
@@ -430,6 +437,9 @@ class SCClient:
             # Start sclang for SynthDefs and OSC forwarding
             sclang_ok, sclang_msg = self._start_sclang()
             if sclang_ok:
+                # Reset connection stability state on successful connect
+                self._last_sclang_ping = time.time()
+                self._consecutive_failures = 0
                 return True, f"Connected to scsynth on port {SCSYNTH_PORT}. {sclang_msg}"
             else:
                 # Connection succeeded but sclang failed - still usable, just warn
@@ -792,11 +802,106 @@ class SCClient:
         """Check if persistent sclang is running and ready for code execution."""
         return self._sclang_process is not None and self._sclang_process.poll() is None
 
-    def eval_code(self, code: str, timeout: float = 30.0) -> tuple[bool, str]:
-        """Execute SuperCollider code via the persistent sclang process.
+    def _check_sclang_health(self) -> bool:
+        """Verify sclang is actually responsive, not just running.
 
-        This is much faster than spawning a new sclang process because the
-        class library is already compiled.
+        Returns True if sclang responds to a ping, False otherwise.
+        """
+        if not self.is_sclang_ready():
+            return False
+
+        # Quick ping with short timeout
+        try:
+            success, output = self._eval_code_internal("1", timeout=2.0)
+            if success:
+                self._last_sclang_ping = time.time()
+                self._consecutive_failures = 0
+                return True
+            # Log why ping failed
+            self._add_log("info", f"Health check failed: {output}")
+        except Exception as e:
+            self._add_log("fail", f"Health check exception: {type(e).__name__}: {e}")
+
+        self._consecutive_failures += 1
+        return False
+
+    def _restart_sclang(self) -> tuple[bool, str]:
+        """Restart the sclang process after a crash or hang.
+
+        Returns (success, message) tuple.
+        """
+        self._add_log("info", "Attempting to restart sclang...")
+
+        # Stop existing process if any
+        self._stop_sclang()
+
+        # Wait a moment for cleanup
+        time.sleep(0.2)
+
+        # Start fresh
+        success, msg = self._start_sclang()
+        if success:
+            self._add_log("info", f"sclang restarted successfully: {msg}")
+            self._consecutive_failures = 0
+        else:
+            self._add_log("fail", f"Failed to restart sclang: {msg}")
+            self._consecutive_failures += 1
+
+        return success, msg
+
+    def _ensure_connection(self) -> tuple[bool, str]:
+        """Ensure sclang connection is healthy, reconnecting if needed.
+
+        This is called before operations that require sclang.
+        Returns (success, message) tuple.
+        """
+        # Fast path: connection is healthy
+        if self.is_sclang_ready() and self._reply_server:
+            # Periodic health check
+            if time.time() - self._last_sclang_ping < self._sclang_ping_interval:
+                return True, "Connected"
+            # Time for a health check
+            if self._check_sclang_health():
+                return True, "Connected"
+
+        # Connection is not healthy - try to reconnect if enabled
+        if not self._auto_reconnect_enabled:
+            return False, "Not connected. Call sc_connect first."
+
+        # Prevent concurrent reconnection attempts
+        if not self._reconnect_lock.acquire(blocking=False):
+            # Another thread is reconnecting, wait briefly and check again
+            time.sleep(0.5)
+            if self._check_sclang_health():
+                return True, "Reconnected by another thread"
+            return False, "Reconnection in progress"
+
+        try:
+            # Check if just sclang died (scsynth still running)
+            if self._reply_server:
+                status = self.get_status()
+                if status.running:
+                    # scsynth is fine, just restart sclang
+                    self._add_log("info", "scsynth running but sclang died, restarting sclang...")
+                    success, msg = self._restart_sclang()
+                    if success:
+                        return True, "Reconnected (sclang restarted)"
+                    return False, f"Failed to restart sclang: {msg}"
+
+            # Full reconnection needed
+            self._add_log("info", "Connection lost, attempting full reconnect...")
+            success, msg = self.connect()
+            if success:
+                return True, f"Reconnected: {msg}"
+            return False, f"Reconnection failed: {msg}"
+
+        finally:
+            self._reconnect_lock.release()
+
+    def _eval_code_internal(self, code: str, timeout: float = 30.0) -> tuple[bool, str]:
+        """Internal implementation of code execution (no auto-reconnect).
+
+        This is used by health checks and the public eval_code method.
 
         Args:
             code: SuperCollider code to execute
@@ -809,10 +914,10 @@ class SCClient:
             return False, "No code provided"
 
         if not self.is_sclang_ready():
-            return False, "Persistent sclang not running. Call sc_connect first."
+            return False, "Persistent sclang not running"
 
         if not self._reply_server:
-            return False, "Not connected. Call sc_connect first."
+            return False, "Not connected"
 
         # Generate unique request ID
         with self._eval_request_lock:
@@ -846,7 +951,7 @@ class SCClient:
                 with self._eval_request_lock:
                     self._eval_events.pop(request_id, None)
                     self._eval_results.pop(request_id, None)
-                return False, f"sclang execution timed out after {timeout}s"
+                return False, f"Execution timed out after {timeout}s"
 
             # Get result
             with self._eval_request_lock:
@@ -857,6 +962,9 @@ class SCClient:
                 return False, "No result received from sclang"
 
             success, output = result
+            # Update last ping time on success
+            if success:
+                self._last_sclang_ping = time.time()
             return success, output
 
         except Exception as e:
@@ -871,6 +979,47 @@ class SCClient:
                     os.unlink(temp_path)
                 except OSError:
                     pass
+
+    def eval_code(self, code: str, timeout: float = 30.0) -> tuple[bool, str]:
+        """Execute SuperCollider code via the persistent sclang process.
+
+        This is much faster than spawning a new sclang process because the
+        class library is already compiled. Automatically reconnects if the
+        connection is lost.
+
+        Args:
+            code: SuperCollider code to execute
+            timeout: Maximum time to wait for result (default 30s)
+
+        Returns:
+            (success, output) tuple
+        """
+        if not code or not code.strip():
+            return False, "No code provided"
+
+        # Ensure connection is healthy (with auto-reconnect)
+        conn_ok, conn_msg = self._ensure_connection()
+        if not conn_ok:
+            return False, f"Connection failed: {conn_msg}"
+
+        # Execute the code
+        success, output = self._eval_code_internal(code, timeout)
+
+        # If execution failed, check if it's a connection issue
+        if not success and ("not running" in output.lower() or "not connected" in output.lower()):
+            self._consecutive_failures += 1
+            # Try reconnecting once
+            if self._auto_reconnect_enabled and self._consecutive_failures <= 2:
+                self._add_log("info", f"Execution failed ({output}), attempting reconnect...")
+                conn_ok, conn_msg = self._ensure_connection()
+                if conn_ok:
+                    # Retry the execution
+                    success, output = self._eval_code_internal(code, timeout)
+
+        if success:
+            self._consecutive_failures = 0
+
+        return success, output
 
     # Reference capture and comparison methods
 

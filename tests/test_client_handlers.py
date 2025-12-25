@@ -1231,20 +1231,22 @@ class TestEvalCode:
         assert "No code provided" in message
 
     def test_requires_sclang_running(self, client):
-        """Should fail when sclang not running."""
+        """Should fail when sclang not running (with auto-reconnect disabled)."""
         client._sclang_process = None
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
 
         success, message = client.eval_code("1 + 1")
         assert success is False
-        assert "not running" in message.lower()
+        assert "not running" in message.lower() or "not connected" in message.lower()
 
     def test_requires_connection(self, client, mocker):
-        """Should fail when not connected."""
+        """Should fail when not connected (with auto-reconnect disabled)."""
         # Mock sclang as running
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
         client._reply_server = None
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
 
         success, message = client.eval_code("1 + 1")
         assert success is False
@@ -1279,12 +1281,16 @@ class TestEvalCode:
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
+        client._last_sclang_ping = mocker.MagicMock()  # Fake recent ping
 
         mock_server = mocker.MagicMock()
         mock_server.socket = mocker.MagicMock()
         client._reply_server = mock_server
 
         # Don't simulate any response - let it timeout
+        import time
+        client._last_sclang_ping = time.time()  # Pretend we just pinged
         success, message = client.eval_code("1+1", timeout=0.01)
 
         assert success is False
@@ -1298,12 +1304,15 @@ class TestEvalCode:
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
 
         mock_server = mocker.MagicMock()
         mock_server.socket = mocker.MagicMock()
         mock_server.socket.sendto.side_effect = OSError("Network error")
         client._reply_server = mock_server
 
+        import time
+        client._last_sclang_ping = time.time()  # Pretend we just pinged
         success, message = client.eval_code("1+1")
 
         assert success is False
@@ -1445,9 +1454,13 @@ class TestRecording:
 
     def test_start_recording_reverts_state_on_eval_failure(self, client, mocker):
         """Should revert recording state if eval_code fails."""
+        import time
+
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
+        client._last_sclang_ping = time.time()  # Bypass health check
 
         mock_server = mocker.MagicMock()
         mock_server.socket = mocker.MagicMock()
@@ -1625,9 +1638,13 @@ class TestRecording:
 
     def test_disconnect_logs_stop_failure(self, client, mocker):
         """Disconnect should log failure if stop_recording fails."""
+        import time
+
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
+        client._last_sclang_ping = time.time()  # Bypass health check
 
         mock_server = mocker.MagicMock()
         mock_server.socket = mocker.MagicMock()
@@ -1706,6 +1723,8 @@ class TestRecording:
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
         client._sclang_process = mock_proc
+        client._auto_reconnect_enabled = False  # Disable auto-reconnect for this test
+        client._last_sclang_ping = time.time()  # Bypass health check
 
         mock_server = mocker.MagicMock()
         mock_server.socket = mocker.MagicMock()
@@ -1744,3 +1763,262 @@ class TestRecording:
             time.sleep(0.01)
 
         assert found_log, "Expected 'Auto-stop recording failed' log entry"
+
+
+class TestConnectionStability:
+    """Tests for connection stability features (health check, auto-reconnect, restart)."""
+
+    def test_check_sclang_health_returns_false_when_no_process(self, client):
+        """Health check should return False when sclang is not running."""
+        client._sclang_process = None
+        assert client._check_sclang_health() is False
+
+    def test_check_sclang_health_returns_false_when_process_exited(self, client, mocker):
+        """Health check should return False when sclang process has exited."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = 1  # Non-None means process exited
+        client._sclang_process = mock_proc
+        assert client._check_sclang_health() is False
+
+    def test_check_sclang_health_returns_true_when_ping_succeeds(self, client, mocker):
+        """Health check should return True when ping succeeds."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None  # Still running
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_ping_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "pong")
+
+        mock_server.socket.sendto.side_effect = simulate_ping_response
+
+        result = client._check_sclang_health()
+        assert result is True
+        assert client._consecutive_failures == 0
+
+    def test_check_sclang_health_returns_false_on_timeout(self, client, mocker):
+        """Health check should return False and increment failures when ping times out."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._consecutive_failures = 0
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Mock eval_code_internal to simulate timeout
+        mocker.patch.object(client, '_eval_code_internal', return_value=(False, "Timeout"))
+
+        result = client._check_sclang_health()
+        assert result is False
+        assert client._consecutive_failures == 1  # Now increments on failure
+
+    def test_ensure_connection_skips_when_recent_ping(self, client, mocker):
+        """Ensure connection should skip check if recent ping succeeded."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._reply_server = mocker.MagicMock()  # Required for fast path
+        client._last_sclang_ping = time.time()  # Just pinged
+
+        # Should return success without calling _check_sclang_health
+        spy = mocker.spy(client, '_check_sclang_health')
+        success, message = client._ensure_connection()
+        assert success is True
+        assert "Connected" in message
+        spy.assert_not_called()
+
+    def test_ensure_connection_checks_when_stale_ping(self, client, mocker):
+        """Ensure connection should check health if ping is stale."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._last_sclang_ping = time.time() - 60  # Stale ping
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_ping_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "pong")
+
+        mock_server.socket.sendto.side_effect = simulate_ping_response
+
+        success, message = client._ensure_connection()
+        assert success is True
+
+    def test_eval_code_with_auto_reconnect_disabled(self, client, mocker):
+        """Eval should fail immediately when auto-reconnect is disabled."""
+        client._sclang_process = None
+        client._auto_reconnect_enabled = False
+
+        success, message = client.eval_code("1 + 1")
+        assert success is False
+        assert "not running" in message.lower() or "not connected" in message.lower()
+
+    def test_restart_sclang_cleans_up_old_process(self, client, mocker):
+        """Restart should terminate old process before starting new one."""
+        old_proc = mocker.MagicMock()
+        old_proc.poll.return_value = None  # Still running
+        client._sclang_process = old_proc
+
+        # Mock _start_sclang to avoid actually starting (returns tuple)
+        mock_start = mocker.patch.object(client, '_start_sclang', return_value=(True, "Started"))
+
+        client._restart_sclang()
+
+        # Old process should be terminated
+        old_proc.terminate.assert_called_once()
+        # New sclang should be started
+        mock_start.assert_called_once()
+
+    def test_restart_sclang_handles_no_process(self, client, mocker):
+        """Restart should handle case when no process exists."""
+        client._sclang_process = None
+
+        mock_start = mocker.patch.object(client, '_start_sclang', return_value=(True, "Started"))
+
+        success, message = client._restart_sclang()
+
+        # Should still start a new sclang
+        mock_start.assert_called_once()
+        assert success is True
+
+    def test_auto_reconnect_flag_default(self, client):
+        """Auto-reconnect should be enabled by default."""
+        assert client._auto_reconnect_enabled is True
+
+    def test_consecutive_failures_reset_on_success(self, client, mocker):
+        """Consecutive failures counter should reset on successful health check."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._consecutive_failures = 3
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_ping_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "pong")
+
+        mock_server.socket.sendto.side_effect = simulate_ping_response
+
+        client._check_sclang_health()
+        assert client._consecutive_failures == 0
+
+    def test_ensure_connection_restarts_sclang_when_scsynth_alive(self, client, mocker):
+        """Should restart only sclang when scsynth is still running."""
+        from sc_repl_mcp.types import ServerStatus
+
+        # sclang process is dead
+        client._sclang_process = None
+
+        # But reply_server exists and scsynth is running
+        mock_server = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        mock_status = ServerStatus(running=True)
+        mocker.patch.object(client, 'get_status', return_value=mock_status)
+
+        mock_restart = mocker.patch.object(client, '_restart_sclang', return_value=(True, "Started"))
+        mock_connect = mocker.patch.object(client, 'connect')
+
+        success, message = client._ensure_connection()
+
+        assert success is True
+        assert "sclang restarted" in message
+        mock_restart.assert_called_once()
+        mock_connect.assert_not_called()  # Should NOT do full reconnect
+
+    def test_ensure_connection_does_full_reconnect_when_no_server(self, client, mocker):
+        """Should do full reconnect when reply_server is None."""
+        client._sclang_process = None
+        client._reply_server = None
+
+        mock_connect = mocker.patch.object(client, 'connect', return_value=(True, "Connected"))
+
+        success, message = client._ensure_connection()
+
+        assert success is True
+        assert "Reconnected" in message
+        mock_connect.assert_called_once()
+
+    def test_eval_code_retries_after_connection_failure(self, client, mocker):
+        """Should retry execution after reconnecting on first failure."""
+        client._consecutive_failures = 0
+
+        # First execution fails with connection error, second succeeds
+        internal_calls = [0]
+
+        def mock_internal(code, timeout=30.0):
+            internal_calls[0] += 1
+            if internal_calls[0] == 1:
+                return False, "Persistent sclang not running"
+            return True, "42"
+
+        mocker.patch.object(client, '_eval_code_internal', side_effect=mock_internal)
+        mocker.patch.object(client, '_ensure_connection', return_value=(True, "Connected"))
+
+        success, output = client.eval_code("21 * 2")
+
+        assert success is True
+        assert output == "42"
+        assert internal_calls[0] == 2  # Should have retried
+
+    def test_ensure_connection_handles_concurrent_reconnect(self, client, mocker):
+        """Should handle case when another thread is reconnecting."""
+        import threading
+
+        client._sclang_process = None
+        client._reply_server = None
+
+        # Simulate lock being held by another thread
+        client._reconnect_lock.acquire()
+
+        # Mock health check to return True (simulating other thread completed reconnect)
+        mocker.patch.object(client, '_check_sclang_health', return_value=True)
+
+        # Run in separate thread since main thread would block
+        result = [None]
+
+        def check_connection():
+            result[0] = client._ensure_connection()
+
+        thread = threading.Thread(target=check_connection)
+        thread.start()
+        time.sleep(0.1)  # Let thread start and hit the lock
+        client._reconnect_lock.release()  # Release to let it proceed
+        thread.join(timeout=2.0)
+
+        assert result[0] is not None
+        success, message = result[0]
+        assert success is True
+        assert "another thread" in message.lower()
+
+    def test_check_sclang_health_handles_exception(self, client, mocker):
+        """Should return False and log if ping raises exception."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._consecutive_failures = 0
+
+        mock_server = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        mocker.patch.object(client, '_eval_code_internal', side_effect=OSError("Socket error"))
+
+        result = client._check_sclang_health()
+
+        assert result is False
+        assert client._consecutive_failures == 1
+        # Check that error was logged
+        logs = client.get_logs(category="fail")
+        assert any("Health check exception" in log.message for log in logs)
