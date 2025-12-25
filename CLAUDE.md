@@ -59,6 +59,9 @@ Do NOT rely on memory for SC specifics - the API has many subtle variations that
 ### Syntax Validation
 - `sc_validate_syntax(code)` - Check code syntax without executing (fast ~5ms)
 
+### MIDI Export
+- `sc_export_midi(code, output_path, tempo, ...)` - Export sendBundle() sequences to MIDI file
+
 ### Advanced Tools
 - `sc_eval(code)` - Execute arbitrary SuperCollider code
 - `sc_get_logs` / `sc_clear_logs` - Server log access
@@ -214,6 +217,36 @@ sc_validate_syntax("{ SinOsc.ar(440 }")
 ```
 
 The validator uses tree-sitter for fast (~5ms) validation, with sclang compile() as a fallback for edge cases.
+
+## MIDI Export
+
+Export SuperCollider sequences to standard MIDI files:
+
+```python
+# Export a sequence to MIDI
+sc_export_midi('''
+    s.sendBundle(0.0, [\\s_new, \\ping, -1, 0, 0, \\freq, 440, \\amp, 0.2]);
+    s.sendBundle(0.25, [\\s_new, \\ping, -1, 0, 0, \\freq, 550, \\amp, 0.3]);
+    s.sendBundle(0.5, [\\s_new, \\ping, -1, 0, 0, \\freq, 660, \\amp, 0.4]);
+''', output_path="~/melody.mid", tempo=120)
+```
+
+### Parameters
+- `code` - SuperCollider code containing s.sendBundle() calls
+- `output_path` - Output file path (optional, uses temp file if not provided)
+- `tempo` - BPM for MIDI timing (default: 120)
+- `default_duration` - Note duration in seconds when not specified (default: 0.25)
+- `default_velocity` - MIDI velocity 1-127 (default: 100)
+- `ticks_per_beat` - MIDI resolution (default: 480)
+
+### Note Duration
+Duration is determined in this order:
+1. Explicit `\dur` parameter in the sendBundle call
+2. Time gap to the next note
+3. `default_duration` parameter
+
+### Frequency to MIDI
+Frequencies are converted to MIDI note numbers (A4 = 440 Hz = MIDI 69).
 
 ## Debugging
 

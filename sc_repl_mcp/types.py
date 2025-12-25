@@ -74,3 +74,14 @@ class ReferenceSnapshot:
     analysis: AnalysisData
     spectrum: Optional[SpectrumData] = None
     description: str = ""
+
+
+@dataclass
+class NoteEvent:
+    """A parsed note event from sendBundle() for MIDI export."""
+    time: float           # Start time in seconds
+    synthdef: str         # SynthDef name
+    freq: float           # Frequency in Hz
+    amp: float = 0.5      # Amplitude 0-1
+    dur: Optional[float] = None  # Duration if specified
+    params: dict = field(default_factory=dict)  # All other params
