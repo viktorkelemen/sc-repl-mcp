@@ -812,14 +812,17 @@ class SCClient:
 
         # Quick ping with short timeout
         try:
-            success, _ = self._eval_code_internal("1", timeout=2.0)
+            success, output = self._eval_code_internal("1", timeout=2.0)
             if success:
                 self._last_sclang_ping = time.time()
                 self._consecutive_failures = 0
                 return True
-        except Exception:
-            pass
+            # Log why ping failed
+            self._add_log("info", f"Health check failed: {output}")
+        except Exception as e:
+            self._add_log("fail", f"Health check exception: {type(e).__name__}: {e}")
 
+        self._consecutive_failures += 1
         return False
 
     def _restart_sclang(self) -> tuple[bool, str]:
@@ -869,7 +872,7 @@ class SCClient:
         if not self._reconnect_lock.acquire(blocking=False):
             # Another thread is reconnecting, wait briefly and check again
             time.sleep(0.5)
-            if self.is_sclang_ready():
+            if self._check_sclang_health():
                 return True, "Reconnected by another thread"
             return False, "Reconnection in progress"
 
