@@ -639,6 +639,57 @@ def sc_stop_recording() -> str:
     return message
 
 
+# MIDI export tool
+
+@mcp.tool()
+def sc_export_midi(
+    code: str,
+    output_path: Optional[str] = None,
+    default_duration: float = 0.25,
+    default_velocity: int = 100,
+    tempo: int = 120,
+    ticks_per_beat: int = 480,
+) -> str:
+    """Export SuperCollider sendBundle() sequences to MIDI file.
+
+    Parses s.sendBundle() calls with \\s_new commands and converts them to
+    a standard MIDI file. Useful for exporting compositions to DAWs or
+    other MIDI-compatible software.
+
+    Args:
+        code: SuperCollider code containing s.sendBundle() calls
+        output_path: Output file path. If not provided, saves to temp file.
+        default_duration: Default note duration in seconds when not specified (default: 0.25)
+        default_velocity: Default MIDI velocity 1-127 (default: 100)
+        tempo: Tempo in BPM (default: 120)
+        ticks_per_beat: MIDI resolution (default: 480)
+
+    Example:
+        sc_export_midi('''
+            s.sendBundle(0.0, [\\s_new, \\ping, -1, 0, 0, \\freq, 440, \\amp, 0.2]);
+            s.sendBundle(0.5, [\\s_new, \\ping, -1, 0, 0, \\freq, 550, \\amp, 0.3]);
+            s.sendBundle(1.0, [\\s_new, \\ping, -1, 0, 0, \\freq, 660, \\amp, 0.4]);
+        ''', output_path="~/melody.mid", tempo=100)
+
+    Returns:
+        Path to the saved MIDI file, or error message.
+    """
+    from .midi import export_midi
+
+    success, message, path = export_midi(
+        code=code,
+        output_path=output_path,
+        tempo=tempo,
+        ticks_per_beat=ticks_per_beat,
+        default_duration=default_duration,
+        default_velocity=default_velocity,
+    )
+
+    if success:
+        return f"{message}\nSaved to: {path}"
+    return f"Export failed: {message}"
+
+
 # Syntax validation tool
 
 @mcp.tool()
