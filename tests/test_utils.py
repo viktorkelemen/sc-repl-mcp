@@ -1,9 +1,11 @@
 """Tests for sc_repl_mcp.utils pure functions."""
 
 import math
+import os
+import subprocess
 import pytest
 
-from sc_repl_mcp.utils import freq_to_note, amp_to_db, NOTE_NAMES
+from sc_repl_mcp.utils import freq_to_note, amp_to_db, kill_process_on_port, NOTE_NAMES
 
 
 class TestFreqToNote:
@@ -157,3 +159,134 @@ class TestAmpToDb:
         assert amp_to_db(0.2) == pytest.approx(-14.0, abs=0.5)
         # Loud sound
         assert amp_to_db(0.7) == pytest.approx(-3.1, abs=0.5)
+
+
+class TestKillProcessOnPort:
+    """Tests for kill_process_on_port function."""
+
+    def test_no_process_on_port(self, mocker):
+        """Should return False when no process is using the port."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=1,  # lsof returns 1 when no process found
+            stdout=""
+        )
+
+        result = kill_process_on_port(12345)
+
+        assert result is False
+        mock_run.assert_called_once()
+
+    def test_kills_process_on_port(self, mocker):
+        """Should kill process and return True when process found."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="12345\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
+
+        result = kill_process_on_port(57130)
+
+        assert result is True
+        mock_kill.assert_called_once_with(12345, mocker.ANY)
+        mock_sleep.assert_called_once_with(0.1)
+
+    def test_skips_own_process(self, mocker):
+        """Should not kill own process."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="12345\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        # Return same PID as in lsof output
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=12345)
+
+        result = kill_process_on_port(57130)
+
+        assert result is True
+        mock_kill.assert_not_called()  # Should not kill itself
+
+    def test_handles_multiple_pids(self, mocker):
+        """Should handle multiple PIDs on same port."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="12345\n12346\n12347\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
+
+        result = kill_process_on_port(57130)
+
+        assert result is True
+        assert mock_kill.call_count == 3
+
+    def test_handles_invalid_pid(self, mocker):
+        """Should handle non-numeric PID gracefully."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="not_a_pid\n12345\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+        mock_sleep = mocker.patch("sc_repl_mcp.utils.time.sleep")
+
+        result = kill_process_on_port(57130)
+
+        assert result is True
+        # Should only kill the valid PID
+        mock_kill.assert_called_once_with(12345, mocker.ANY)
+
+    def test_handles_process_not_found(self, mocker):
+        """Should handle ProcessLookupError gracefully."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="12345\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        mock_kill.side_effect = ProcessLookupError("No such process")
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+
+        result = kill_process_on_port(57130)
+
+        assert result is True  # Still returns True since we tried
+
+    def test_handles_permission_error(self, mocker):
+        """Should handle PermissionError gracefully."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="12345\n"
+        )
+        mock_kill = mocker.patch("sc_repl_mcp.utils.os.kill")
+        mock_kill.side_effect = PermissionError("Operation not permitted")
+        mock_getpid = mocker.patch("sc_repl_mcp.utils.os.getpid", return_value=99999)
+
+        result = kill_process_on_port(57130)
+
+        assert result is True
+
+    def test_handles_timeout(self, mocker):
+        """Should handle subprocess timeout gracefully."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.side_effect = subprocess.TimeoutExpired("lsof", 5)
+
+        result = kill_process_on_port(57130)
+
+        assert result is False
+
+    def test_handles_lsof_not_found(self, mocker):
+        """Should handle lsof not being available."""
+        mock_run = mocker.patch("sc_repl_mcp.utils.subprocess.run")
+        mock_run.side_effect = FileNotFoundError("lsof not found")
+
+        result = kill_process_on_port(57130)
+
+        assert result is False
