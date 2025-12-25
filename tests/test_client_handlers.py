@@ -1310,3 +1310,437 @@ class TestEvalCode:
         assert "Failed to send" in message
         # Verify event was cleaned up
         assert len(client._eval_events) == 0
+
+
+class TestRecording:
+    """Tests for audio recording methods."""
+
+    def test_start_recording_requires_sclang(self, client):
+        """Should fail when sclang not running."""
+        client._sclang_process = None
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Not connected" in message
+
+    def test_start_recording_rejects_already_recording(self, client, mocker):
+        """Should fail when already recording."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+        client._is_recording = True
+        client._recording_path = "/tmp/existing.wav"
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Already recording" in message
+        assert "/tmp/existing.wav" in message
+
+    def test_start_recording_validates_header_format(self, client, mocker):
+        """Should reject invalid header formats."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        success, message = client.start_recording(header_format="mp3")
+
+        assert success is False
+        assert "Invalid header format" in message
+        assert "wav" in message  # Should list valid formats
+
+    def test_start_recording_validates_sample_format(self, client, mocker):
+        """Should reject invalid sample formats."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        success, message = client.start_recording(sample_format="mp3")
+
+        assert success is False
+        assert "Invalid sample format" in message
+
+    def test_start_recording_validates_channels(self, client, mocker):
+        """Should reject invalid channel counts."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        success, message = client.start_recording(channels=0)
+        assert success is False
+        assert "Channels" in message
+
+        success, message = client.start_recording(channels=100)
+        assert success is False
+        assert "Channels" in message
+
+    def test_start_recording_validates_duration(self, client, mocker):
+        """Should reject non-positive duration."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        success, message = client.start_recording(duration=0)
+        assert success is False
+        assert "Duration must be positive" in message
+
+        success, message = client.start_recording(duration=-1)
+        assert success is False
+        assert "Duration must be positive" in message
+
+    def test_start_recording_success(self, client, mocker):
+        """Should start recording when sclang available."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Simulate successful response with path
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "/Users/test/Music/SC_recording.wav"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        success, message = client.start_recording()
+
+        assert success is True
+        assert "Recording started" in message
+        assert client._is_recording is True
+        assert client._recording_path == "/Users/test/Music/SC_recording.wav"
+
+    def test_start_recording_expands_path(self, client, mocker):
+        """Should expand ~ and make path absolute."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "/Users/test/my_recording.wav"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        success, _ = client.start_recording(path="~/my_recording.wav")
+
+        assert success is True
+
+    def test_start_recording_reverts_state_on_eval_failure(self, client, mocker):
+        """Should revert recording state if eval_code fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_failure(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                0,  # Failure
+                "ERROR: Server not running"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_failure
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Failed to start recording" in message
+        # State should be reverted
+        assert client._is_recording is False
+        assert client._recording_path is None
+
+    def test_start_recording_validates_path_extraction(self, client, mocker):
+        """Should fail if path extraction returns garbage."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        def simulate_bad_output(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "WARNING: Something went wrong"  # No valid path
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_bad_output
+
+        success, message = client.start_recording()
+
+        assert success is False
+        assert "Could not determine recording path" in message
+        # State should be reverted
+        assert client._is_recording is False
+
+    def test_start_recording_increments_session_id(self, client, mocker):
+        """Should increment session ID for each recording."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        initial_session_id = client._recording_session_id
+
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result(
+                "/mcp/eval/result",
+                request_id,
+                1,
+                "/tmp/recording1.wav"
+            )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        client.start_recording()
+        first_session = client._recording_session_id
+        assert first_session == initial_session_id + 1
+
+        # Stop and start another
+        client._is_recording = False
+        client.start_recording()
+        second_session = client._recording_session_id
+        assert second_session == first_session + 1
+
+    def test_stop_recording_when_not_recording(self, client):
+        """Should fail when not currently recording."""
+        client._is_recording = False
+
+        success, message = client.stop_recording()
+
+        assert success is False
+        assert "Not currently recording" in message
+
+    def test_stop_recording_success(self, client, mocker):
+        """Should stop recording and clear state."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Set up recording state
+        client._is_recording = True
+        client._recording_path = "/tmp/test.wav"
+
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "Recording stopped")
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        success, message = client.stop_recording()
+
+        assert success is True
+        assert "Recording saved" in message
+        assert "/tmp/test.wav" in message
+        assert client._is_recording is False
+        assert client._recording_path is None
+
+    def test_stop_recording_without_sclang(self, client):
+        """Should clear state even if sclang unavailable."""
+        client._sclang_process = None
+        client._is_recording = True
+        client._recording_path = "/tmp/test.wav"
+
+        success, message = client.stop_recording()
+
+        assert success is False
+        assert "sclang not available" in message
+        # State should still be cleared
+        assert client._is_recording is False
+        assert client._recording_path is None
+
+    def test_is_recording(self, client):
+        """Should return recording state."""
+        client._is_recording = False
+        assert client.is_recording() is False
+
+        client._is_recording = True
+        assert client.is_recording() is True
+
+    def test_get_recording_path(self, client):
+        """Should return current recording path."""
+        client._recording_path = None
+        assert client.get_recording_path() is None
+
+        client._recording_path = "/tmp/test.wav"
+        assert client.get_recording_path() == "/tmp/test.wav"
+
+    def test_disconnect_stops_recording(self, client, mocker):
+        """Disconnect should stop recording if in progress."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        client._is_recording = True
+        client._recording_path = "/tmp/test.wav"
+
+        def simulate_response(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 1, "ok")
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        client.disconnect()
+
+        assert client._is_recording is False
+
+    def test_disconnect_logs_stop_failure(self, client, mocker):
+        """Disconnect should log failure if stop_recording fails."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        client._is_recording = True
+        client._recording_path = "/tmp/test.wav"
+
+        def simulate_failure(dgram, addr):
+            request_id = client._eval_request_id
+            client._handle_eval_result("/mcp/eval/result", request_id, 0, "ERROR: timeout")
+
+        mock_server.socket.sendto.side_effect = simulate_failure
+
+        client.disconnect()
+
+        # Should have logged the failure
+        logs = client.get_logs(category="fail")
+        assert len(logs) >= 1
+        assert any("Failed to stop recording during disconnect" in log.message for log in logs)
+
+    def test_auto_stop_respects_session_id(self, client, mocker):
+        """Auto-stop should not stop a different recording session."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        # Start recording with duration
+        call_count = [0]
+
+        def simulate_response(dgram, addr):
+            call_count[0] += 1
+            request_id = client._eval_request_id
+            if call_count[0] == 1:
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/first.wav"
+                )
+            else:
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/second.wav"
+                )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        # Mock sleep to return immediately
+        mocker.patch('time.sleep')
+
+        # Start first recording with auto-stop
+        success, _ = client.start_recording(duration=1.0)
+        assert success is True
+        first_session = client._recording_session_id
+
+        # Manually stop before auto-stop fires
+        client._is_recording = False
+        client._recording_path = None
+
+        # Start second recording (different session)
+        success, _ = client.start_recording()
+        assert success is True
+        second_session = client._recording_session_id
+        assert second_session != first_session
+
+        # Second recording should still be active
+        # (auto-stop from first should have checked session ID and aborted)
+        assert client._is_recording is True
+        assert client._recording_path == "/tmp/second.wav"
+
+    def test_auto_stop_logs_failure(self, client, mocker):
+        """Auto-stop should log failure if stop_recording fails."""
+        import time
+
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        client._sclang_process = mock_proc
+
+        mock_server = mocker.MagicMock()
+        mock_server.socket = mocker.MagicMock()
+        client._reply_server = mock_server
+
+        call_count = [0]
+
+        def simulate_response(dgram, addr):
+            call_count[0] += 1
+            request_id = client._eval_request_id
+            if call_count[0] == 1:
+                # First call (start recording) succeeds
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 1, "/tmp/test.wav"
+                )
+            else:
+                # Second call (stop recording) fails
+                client._handle_eval_result(
+                    "/mcp/eval/result", request_id, 0, "ERROR: timeout"
+                )
+
+        mock_server.socket.sendto.side_effect = simulate_response
+
+        # Start recording with very short duration
+        success, _ = client.start_recording(duration=0.001)
+        assert success is True
+
+        # Poll for the log entry with timeout (auto-stop thread needs time to complete)
+        deadline = time.time() + 1.0
+        found_log = False
+        while time.time() < deadline:
+            logs = client.get_logs(category="fail")
+            if any("Auto-stop recording failed" in log.message for log in logs):
+                found_log = True
+                break
+            time.sleep(0.01)
+
+        assert found_log, "Expected 'Auto-stop recording failed' log entry"

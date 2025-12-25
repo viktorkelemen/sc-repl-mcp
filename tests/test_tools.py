@@ -426,3 +426,81 @@ class TestScClearLogs:
 
         assert result == "Log buffer cleared"
         mock_sc_client.clear_logs.assert_called_once()
+
+
+class TestScStartRecording:
+    """Tests for sc_start_recording tool."""
+
+    def test_starts_recording_with_defaults(self, mock_sc_client):
+        mock_sc_client.start_recording.return_value = (
+            True, "Recording started: /Users/test/Music/SC_recording.wav"
+        )
+
+        from sc_repl_mcp.tools import sc_start_recording
+        result = sc_start_recording()
+
+        mock_sc_client.start_recording.assert_called_once_with(
+            path=None,
+            duration=None,
+            header_format="wav",
+            sample_format="int24",
+            channels=2,
+        )
+        assert "Recording started" in result
+
+    def test_passes_all_parameters(self, mock_sc_client):
+        mock_sc_client.start_recording.return_value = (
+            True, "Recording started: /tmp/test.aiff"
+        )
+
+        from sc_repl_mcp.tools import sc_start_recording
+        result = sc_start_recording(
+            path="/tmp/test.aiff",
+            duration=10.0,
+            format="aiff",
+            sample_format="int16",
+            channels=4,
+        )
+
+        mock_sc_client.start_recording.assert_called_once_with(
+            path="/tmp/test.aiff",
+            duration=10.0,
+            header_format="aiff",
+            sample_format="int16",
+            channels=4,
+        )
+
+    def test_returns_error_when_already_recording(self, mock_sc_client):
+        mock_sc_client.start_recording.return_value = (
+            False, "Already recording to: /tmp/existing.wav"
+        )
+
+        from sc_repl_mcp.tools import sc_start_recording
+        result = sc_start_recording()
+
+        assert "Already recording" in result
+
+
+class TestScStopRecording:
+    """Tests for sc_stop_recording tool."""
+
+    def test_stops_recording_and_returns_path(self, mock_sc_client):
+        mock_sc_client.stop_recording.return_value = (
+            True, "Recording saved: /Users/test/Music/SC_recording.wav"
+        )
+
+        from sc_repl_mcp.tools import sc_stop_recording
+        result = sc_stop_recording()
+
+        mock_sc_client.stop_recording.assert_called_once()
+        assert "Recording saved" in result
+
+    def test_returns_error_when_not_recording(self, mock_sc_client):
+        mock_sc_client.stop_recording.return_value = (
+            False, "Not currently recording"
+        )
+
+        from sc_repl_mcp.tools import sc_stop_recording
+        result = sc_stop_recording()
+
+        assert "Not currently recording" in result
