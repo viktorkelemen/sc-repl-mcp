@@ -11,7 +11,7 @@ This MCP server enables Claude to control SuperCollider for sound synthesis and 
 
 ## Performance: Persistent sclang
 
-After `sc_connect`, a persistent sclang process stays running. This makes `sc_eval` and `sc_load_synthdef` **much faster** (~10ms vs 2-5s) by avoiding class library recompilation on each call.
+After `sc_connect`, a persistent sclang process stays running. This makes `sc_eval`, `sc_load_synthdef`, and `sc_validate_syntax` **much faster** (~10ms vs 2-5s) by avoiding class library recompilation on each call.
 
 - **Connected**: Uses persistent sclang (fast)
 - **Not connected**: Falls back to spawning fresh sclang (slow)
@@ -57,7 +57,7 @@ Do NOT rely on memory for SC specifics - the API has many subtle variations that
 - `sc_analyze_parameter(synthdef, param, values, metric)` - Measure how parameters affect sound
 
 ### Syntax Validation
-- `sc_validate_syntax(code)` - Check code syntax without executing (fast ~5ms)
+- `sc_validate_syntax(code)` - Check code syntax without executing (~10ms when connected)
 
 ### MIDI Export
 - `sc_export_midi(code, output_path, tempo, ...)` - Export sendBundle() sequences to MIDI file
@@ -208,15 +208,15 @@ sc_validate_syntax('''
         Out.ar(0, sig);
     })
 ''')
-# Returns: "Syntax valid (checked with tree-sitter)"
+# Returns: "Syntax valid (checked with persistent sclang)"
 
 # Catch errors with line numbers
 sc_validate_syntax("{ SinOsc.ar(440 }")
-# Returns: "Syntax errors found (checked with tree-sitter):
-#   Line 1, col 17: Unexpected syntax near: { SinOsc.ar(440 }"
+# Returns: "Syntax errors found (checked with persistent sclang):
+#   Line 1, col 17: ..."
 ```
 
-The validator uses tree-sitter for fast (~5ms) validation, with sclang compile() as a fallback for edge cases.
+When connected, validation uses the persistent sclang process (~10ms). When not connected, it falls back to tree-sitter (~5ms) or spawns a fresh sclang process.
 
 ## MIDI Export
 
