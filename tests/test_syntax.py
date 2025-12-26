@@ -595,7 +595,7 @@ class TestValidateWithPersistentSclangHelper:
         assert '\\"hello\\"' in call_args
 
     def test_handles_eval_failure(self, mocker):
-        """Helper should handle eval_code failures gracefully."""
+        """Helper should handle eval_code failures as connection errors, not syntax errors."""
         from sc_repl_mcp.tools import _validate_with_persistent_sclang
 
         mocker.patch(
@@ -606,4 +606,22 @@ class TestValidateWithPersistentSclangHelper:
         is_valid, msg, errors = _validate_with_persistent_sclang("code")
 
         assert not is_valid
-        assert len(errors) > 0
+        assert "connection" in msg.lower()
+        assert len(errors) == 1
+        assert "connection error" in errors[0]["message"].lower()
+
+    def test_connection_error_shown_to_user(self, mocker):
+        """Connection errors should be shown as infrastructure issues, not syntax errors."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(False, "Connection lost"),
+        )
+
+        result = sc_validate_syntax("valid code")
+
+        assert "Cannot validate" in result
+        assert "connection" in result.lower()
+        assert "Syntax errors found" not in result

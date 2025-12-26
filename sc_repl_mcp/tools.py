@@ -719,6 +719,12 @@ if(result.isNil) {{
 
     success, output = sc_client.eval_code(validation_code, timeout=10.0)
 
+    # Handle infrastructure failures separately from syntax errors
+    if not success:
+        return False, "Validation failed (connection issue)", [
+            {"line": 1, "column": 1, "message": f"Connection error: {output}"}
+        ]
+
     if "SYNTAX_OK" in output:
         return True, "Syntax valid", []
 
@@ -781,6 +787,8 @@ def sc_validate_syntax(code: str) -> str:
             return "Cannot validate: sclang not installed. Install SuperCollider for validation."
         if "timed out" in err_msg:
             return f"Validation timed out. Code may be valid but could not be verified.\n  {err['message']}"
+        if "connection error" in err_msg:
+            return f"Cannot validate: connection issue. Try reconnecting.\n  {err['message']}"
 
     lines = [f"Syntax errors found (checked with {backend_info}):"]
     for err in errors:
