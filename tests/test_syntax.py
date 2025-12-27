@@ -285,8 +285,11 @@ class TestScValidateSyntaxTool:
     """Tests for sc_validate_syntax MCP tool."""
 
     def test_valid_code_returns_success_message(self, mocker):
-        """Tool should return success message for valid code."""
+        """Tool should return success message for valid code (fallback path)."""
         from sc_repl_mcp.tools import sc_validate_syntax
+
+        # Mock persistent sclang as not available (test fallback path)
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
 
         # Mock the validator (mock where it's defined, not where imported)
         mock_validator = mocker.Mock()
@@ -303,6 +306,8 @@ class TestScValidateSyntaxTool:
     def test_invalid_code_shows_errors_with_line_numbers(self, mocker):
         """Tool should format errors with line numbers."""
         from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
 
         mock_validator = mocker.Mock()
         mock_validator.validate.return_value = (
@@ -325,6 +330,8 @@ class TestScValidateSyntaxTool:
         """Tool should show why sclang is being used."""
         from sc_repl_mcp.tools import sc_validate_syntax
 
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
+
         mock_validator = mocker.Mock()
         mock_validator.validate.return_value = (True, "Syntax valid", [])
         mock_validator.backend = "sclang"
@@ -339,6 +346,8 @@ class TestScValidateSyntaxTool:
     def test_handles_sclang_not_found(self, mocker):
         """Tool should show helpful message when sclang not found."""
         from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
 
         mock_validator = mocker.Mock()
         mock_validator.validate.return_value = (
@@ -359,6 +368,8 @@ class TestScValidateSyntaxTool:
         """Tool should show helpful message on timeout."""
         from sc_repl_mcp.tools import sc_validate_syntax
 
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
+
         mock_validator = mocker.Mock()
         mock_validator.validate.return_value = (
             False,
@@ -377,6 +388,8 @@ class TestScValidateSyntaxTool:
     def test_column_only_shown_when_greater_than_1(self, mocker):
         """Tool should not show column when it's 1."""
         from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
 
         mock_validator = mocker.Mock()
         mock_validator.validate.return_value = (
@@ -453,3 +466,162 @@ class TestSyntaxValidatorFallbackReason:
         if validator.backend == "sclang":
             assert validator.fallback_reason is not None
             assert len(validator.fallback_reason) > 0
+
+
+class TestPersistentSclangValidation:
+    """Tests for persistent sclang validation path."""
+
+    def test_uses_persistent_sclang_when_ready(self, mocker):
+        """Tool should use persistent sclang when connected."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mock_eval = mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(True, "SYNTAX_OK"),
+        )
+
+        result = sc_validate_syntax("SinOsc.ar(440);")
+
+        assert "Syntax valid" in result
+        assert "persistent sclang" in result
+        mock_eval.assert_called_once()
+
+    def test_persistent_sclang_detects_syntax_error(self, mocker):
+        """Persistent sclang should detect syntax errors."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(True, "ERROR: syntax error, unexpected BINOP\nSYNTAX_ERROR"),
+        )
+
+        result = sc_validate_syntax("{ broken")
+
+        assert "Syntax errors found" in result
+        assert "persistent sclang" in result
+
+    def test_persistent_sclang_empty_code_valid(self, mocker):
+        """Empty code should be valid without calling persistent sclang."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mock_eval = mocker.patch("sc_repl_mcp.tools.sc_client.eval_code")
+
+        result = sc_validate_syntax("")
+
+        assert "Syntax valid" in result
+        mock_eval.assert_not_called()
+
+    def test_persistent_sclang_whitespace_valid(self, mocker):
+        """Whitespace-only code should be valid."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mock_eval = mocker.patch("sc_repl_mcp.tools.sc_client.eval_code")
+
+        result = sc_validate_syntax("   \n\t  ")
+
+        assert "Syntax valid" in result
+        mock_eval.assert_not_called()
+
+    def test_falls_back_when_not_connected(self, mocker):
+        """Tool should fall back to tree-sitter when not connected."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=False)
+
+        mock_validator = mocker.Mock()
+        mock_validator.validate.return_value = (True, "Syntax valid", [])
+        mock_validator.backend = "tree-sitter"
+        mock_validator.fallback_reason = None
+        mocker.patch("sc_repl_mcp.syntax.get_validator", return_value=mock_validator)
+
+        result = sc_validate_syntax("SinOsc.ar(440);")
+
+        assert "tree-sitter" in result
+        mock_validator.validate.assert_called_once()
+
+    def test_persistent_sclang_error_with_line_number(self, mocker):
+        """Persistent sclang errors should include line numbers when available."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(True, "ERROR: syntax error at line 5\nSYNTAX_ERROR"),
+        )
+
+        result = sc_validate_syntax("multi\nline\ncode\nwith\nerror")
+
+        assert "Syntax errors found" in result
+        assert "Line 5" in result
+
+    def test_persistent_sclang_generic_error(self, mocker):
+        """Persistent sclang should handle generic errors."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(True, "SYNTAX_ERROR"),
+        )
+
+        result = sc_validate_syntax("bad code")
+
+        assert "Syntax errors found" in result
+        # Should have some error info even without detailed message
+        assert "Line 1" in result
+
+
+class TestValidateWithPersistentSclangHelper:
+    """Tests for _validate_with_persistent_sclang helper function."""
+
+    def test_escapes_special_characters(self, mocker):
+        """Helper should properly escape code for SC string embedding."""
+        from sc_repl_mcp.tools import _validate_with_persistent_sclang
+
+        mock_eval = mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(True, "SYNTAX_OK"),
+        )
+
+        code_with_quotes = 'var x = "hello";'
+        _validate_with_persistent_sclang(code_with_quotes)
+
+        # Check that eval_code was called with escaped code
+        call_args = mock_eval.call_args[0][0]
+        assert '\\"hello\\"' in call_args
+
+    def test_handles_eval_failure(self, mocker):
+        """Helper should handle eval_code failures as connection errors, not syntax errors."""
+        from sc_repl_mcp.tools import _validate_with_persistent_sclang
+
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(False, "Connection lost"),
+        )
+
+        is_valid, msg, errors = _validate_with_persistent_sclang("code")
+
+        assert not is_valid
+        assert "connection" in msg.lower()
+        assert len(errors) == 1
+        assert "connection error" in errors[0]["message"].lower()
+
+    def test_connection_error_shown_to_user(self, mocker):
+        """Connection errors should be shown as infrastructure issues, not syntax errors."""
+        from sc_repl_mcp.tools import sc_validate_syntax
+
+        mocker.patch("sc_repl_mcp.tools.sc_client.is_sclang_ready", return_value=True)
+        mocker.patch(
+            "sc_repl_mcp.tools.sc_client.eval_code",
+            return_value=(False, "Connection lost"),
+        )
+
+        result = sc_validate_syntax("valid code")
+
+        assert "Cannot validate" in result
+        assert "connection" in result.lower()
+        assert "Syntax errors found" not in result

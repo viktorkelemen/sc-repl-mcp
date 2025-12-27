@@ -692,12 +692,59 @@ def sc_export_midi(
 
 # Syntax validation tool
 
+def _validate_with_persistent_sclang(code: str) -> tuple[bool, str, list[dict]]:
+    """Validate syntax using the persistent sclang process.
+
+    Args:
+        code: SuperCollider code to validate.
+
+    Returns:
+        Tuple of (is_valid, message, errors).
+    """
+    from .sclang import escape_for_sc_string, parse_sclang_errors
+
+    if not code or not code.strip():
+        return True, "Empty code is valid", []
+
+    escaped = escape_for_sc_string(code)
+    validation_code = f'''
+var code = "{escaped}";
+var result = thisProcess.interpreter.compile(code);
+if(result.isNil) {{
+    "SYNTAX_ERROR".postln;
+}} {{
+    "SYNTAX_OK".postln;
+}}
+'''
+
+    success, output = sc_client.eval_code(validation_code, timeout=10.0)
+
+    # Handle infrastructure failures separately from syntax errors
+    if not success:
+        return False, "Validation failed (connection issue)", [
+            {"line": 1, "column": 1, "message": f"Connection error: {output}"}
+        ]
+
+    if "SYNTAX_OK" in output:
+        return True, "Syntax valid", []
+
+    # Parse any error messages from the output
+    errors = parse_sclang_errors(output)
+
+    if not errors:
+        error_msg = output.strip()[:200] if output.strip() else "Syntax error (details unavailable)"
+        errors = [{"line": 1, "column": 1, "message": error_msg}]
+
+    return False, f"Found {len(errors)} syntax error(s)", errors
+
+
 @mcp.tool()
 def sc_validate_syntax(code: str) -> str:
     """Validate SuperCollider code syntax without executing it.
 
-    Uses tree-sitter for fast validation (~5ms) with sclang compile() fallback
-    for edge cases (~200ms). Does not execute the code or produce sound.
+    Uses the persistent sclang process when connected (~10ms), falling back to
+    tree-sitter (~5ms) or spawning a fresh sclang process (~2-5s) otherwise.
+    Does not execute the code or produce sound.
 
     Useful for:
     - Checking SynthDef code before loading
@@ -709,21 +756,26 @@ def sc_validate_syntax(code: str) -> str:
 
     Returns:
         Validation result with any error details including line numbers.
-        Shows which backend (tree-sitter or sclang) was used.
+        Shows which backend was used.
 
     Example:
         sc_validate_syntax("SinOsc.ar(440)")  # Valid
         sc_validate_syntax("{ SinOsc.ar(440 }")  # Error: mismatched brackets
     """
-    from .syntax import get_validator
+    # Try persistent sclang first (authoritative and fast when connected)
+    if sc_client.is_sclang_ready():
+        is_valid, message, errors = _validate_with_persistent_sclang(code)
+        backend_info = "persistent sclang"
+    else:
+        # Fall back to tree-sitter with sclang fallback
+        from .syntax import get_validator
 
-    validator = get_validator()
-    is_valid, message, errors = validator.validate(code)
+        validator = get_validator()
+        is_valid, message, errors = validator.validate(code)
 
-    # Build backend info string
-    backend_info = validator.backend
-    if validator.fallback_reason:
-        backend_info += f" - {validator.fallback_reason}"
+        backend_info = validator.backend
+        if validator.fallback_reason:
+            backend_info += f" - {validator.fallback_reason}"
 
     if is_valid:
         return f"Syntax valid (checked with {backend_info})"
@@ -735,6 +787,8 @@ def sc_validate_syntax(code: str) -> str:
             return "Cannot validate: sclang not installed. Install SuperCollider for validation."
         if "timed out" in err_msg:
             return f"Validation timed out. Code may be valid but could not be verified.\n  {err['message']}"
+        if "connection error" in err_msg:
+            return f"Cannot validate: connection issue. Try reconnecting.\n  {err['message']}"
 
     lines = [f"Syntax errors found (checked with {backend_info}):"]
     for err in errors:
