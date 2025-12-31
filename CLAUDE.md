@@ -18,6 +18,22 @@ After `sc_connect`, a persistent sclang process stays running. This makes `sc_ev
 
 State persists within the session, so variables and functions defined in one `sc_eval` call are available in subsequent calls.
 
+## Multi-Instance Configuration
+
+Multiple MCP server instances can connect to the same SuperCollider server using different ports:
+
+| Environment Variable | Default | Purpose |
+|---------------------|---------|---------|
+| `SC_REPLY_PORT` | 57130 | Port for receiving OSC replies from sclang |
+| `SC_SCLANG_PORT` | 57122 | Port for sclang to listen on |
+
+Example for running a second instance:
+```bash
+SC_REPLY_PORT=57131 SC_SCLANG_PORT=57123 uv run python sc_repl_mcp.py
+```
+
+All instances share the same scsynth audio engine (port 57110).
+
 ## SuperCollider Verification
 
 When writing SynthDefs or SC code, ALWAYS use WebSearch to verify:
