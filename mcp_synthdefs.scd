@@ -1,6 +1,9 @@
 // MCP Audio Analyzer SynthDefs
 // Run this in SuperCollider IDE to enable audio analysis
 // NOTE: This is now optional - sc_connect loads these automatically via sclang
+//
+// IMPORTANT: This file uses hardcoded port 57130. If running multiple MCP instances
+// with custom SC_REPLY_PORT values, change the port in ~mcpAddr below to match.
 
 (
 // Full audio analyzer - pitch, timbre, amplitude, onset, spectrum

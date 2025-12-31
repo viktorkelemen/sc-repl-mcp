@@ -1,16 +1,54 @@
 """Configuration constants for SC-REPL MCP Server."""
 
 import os
+import sys
 
 # Network configuration
 SCSYNTH_HOST = "127.0.0.1"
-SCSYNTH_PORT = 57110
+SCSYNTH_PORT = 57110  # scsynth audio server (not configurable, shared by all instances)
+
+
+def _parse_port(env_var: str, default: int) -> int:
+    """Parse and validate a port number from an environment variable.
+
+    Args:
+        env_var: Name of the environment variable
+        default: Default port to use if env var is not set
+
+    Returns:
+        Valid port number
+
+    Raises:
+        SystemExit: If the port value is invalid (with helpful error message)
+    """
+    value = os.environ.get(env_var)
+    if value is None:
+        return default
+
+    try:
+        port = int(value)
+    except ValueError:
+        sys.stderr.write(
+            f"Error: {env_var}={value!r} is not a valid integer. "
+            f"Expected a port number (1-65535).\n"
+        )
+        sys.exit(1)
+
+    if not (1 <= port <= 65535):
+        sys.stderr.write(
+            f"Error: {env_var}={port} is not a valid port number. "
+            f"Must be between 1 and 65535.\n"
+        )
+        sys.exit(1)
+
+    return port
+
 
 # Configurable ports for multi-instance support
 # Set SC_REPLY_PORT and SC_SCLANG_PORT environment variables to run multiple
 # MCP instances connecting to the same SuperCollider server
-REPLY_PORT = int(os.environ.get("SC_REPLY_PORT", "57130"))  # OSC replies from scsynth/sclang
-SCLANG_OSC_PORT = int(os.environ.get("SC_SCLANG_PORT", "57122"))  # MCP sclang (avoids IDE's 57120)
+REPLY_PORT = _parse_port("SC_REPLY_PORT", 57130)  # OSC replies from scsynth/sclang
+SCLANG_OSC_PORT = _parse_port("SC_SCLANG_PORT", 57122)  # MCP sclang (avoids IDE's 57120)
 
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
