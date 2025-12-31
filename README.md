@@ -93,6 +93,42 @@ A persistent sclang process handles code execution, SynthDef loading, and OSC fo
 
 After `sc_connect`, a persistent sclang process stays running. This makes `sc_eval` and `sc_load_synthdef` **much faster** (~10ms vs 2-5s) by avoiding class library recompilation on each call. State persists within the session.
 
+### Multi-Instance Support
+
+You can run multiple MCP server instances connecting to the same SuperCollider server by configuring different ports for each instance:
+
+```bash
+# Instance 1 (default ports)
+SC_REPLY_PORT=57130 SC_SCLANG_PORT=57122 uv run python sc_repl_mcp.py
+
+# Instance 2
+SC_REPLY_PORT=57131 SC_SCLANG_PORT=57123 uv run python sc_repl_mcp.py
+
+# Instance 3
+SC_REPLY_PORT=57132 SC_SCLANG_PORT=57124 uv run python sc_repl_mcp.py
+```
+
+Or in `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "sc-repl-1": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/sc-repl-mcp", "python", "sc_repl_mcp.py"],
+      "env": {"SC_REPLY_PORT": "57130", "SC_SCLANG_PORT": "57122"}
+    },
+    "sc-repl-2": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/sc-repl-mcp", "python", "sc_repl_mcp.py"],
+      "env": {"SC_REPLY_PORT": "57131", "SC_SCLANG_PORT": "57123"}
+    }
+  }
+}
+```
+
+All instances share the same scsynth audio engine, so sounds from any instance go to the same output.
+
 ## Syntax Validation
 
 The `sc_validate_syntax` tool uses a hybrid approach:

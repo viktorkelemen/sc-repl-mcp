@@ -1,10 +1,16 @@
 """Configuration constants for SC-REPL MCP Server."""
 
+import os
+
 # Network configuration
 SCSYNTH_HOST = "127.0.0.1"
 SCSYNTH_PORT = 57110
-REPLY_PORT = 57130  # Fixed port for OSC replies (orphaned processes are killed on connect)
-SCLANG_OSC_PORT = 57122  # Fixed port for MCP sclang (avoids conflict with IDE's sclang on 57120)
+
+# Configurable ports for multi-instance support
+# Set SC_REPLY_PORT and SC_SCLANG_PORT environment variables to run multiple
+# MCP instances connecting to the same SuperCollider server
+REPLY_PORT = int(os.environ.get("SC_REPLY_PORT", "57130"))  # OSC replies from scsynth/sclang
+SCLANG_OSC_PORT = int(os.environ.get("SC_SCLANG_PORT", "57122"))  # MCP sclang (avoids IDE's 57120)
 
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
@@ -15,9 +21,20 @@ FRESH_PROCESS_STARTUP_BUFFER = 10.0  # Extra time added to timeout for fresh scl
 # These must match between Python (client.py) and SuperCollider (config.py, mcp_synthdefs.scd)
 SPECTRUM_BAND_FREQUENCIES = [60, 100, 156, 244, 380, 594, 928, 1449, 2262, 3531, 5512, 8603, 13428, 16000]
 
-# SuperCollider code to load SynthDefs and set up OSC forwarding
-# This runs in a persistent sclang process started by the MCP server
-SCLANG_INIT_CODE = r'''
+def get_sclang_init_code(sclang_port: int, reply_port: int) -> str:
+    """Generate SuperCollider init code with configured ports.
+
+    This code runs in a persistent sclang process started by the MCP server.
+    It loads SynthDefs and sets up OSC forwarding between scsynth and Python.
+
+    Args:
+        sclang_port: Port for sclang to listen on (receives code execution requests)
+        reply_port: Port for Python to receive OSC replies from sclang
+
+    Returns:
+        SuperCollider code as a string
+    """
+    return rf'''
 // Connect to the existing scsynth server (running in SuperCollider.app)
 // This ensures SynthDefs are added to the correct server
 Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", 57110));
@@ -25,16 +42,16 @@ s = Server.default;
 // Server.remote handles connection automatically
 
 // Open dedicated OSC port for MCP communication (avoids conflict with IDE's sclang on 57120)
-thisProcess.openUDPPort(57122);
-"MCP sclang listening on OSC port 57122".postln;
+thisProcess.openUDPPort({sclang_port});
+"MCP sclang listening on OSC port {sclang_port}".postln;
 
-fork {
+fork {{
     0.5.wait;  // Give server connection time to establish
 
     // MCP Audio Analyzer SynthDefs
 
     // Full audio analyzer - pitch, timbre, amplitude, loudness, onset, spectrum
-    SynthDef(\mcp_analyzer, {
+    SynthDef(\mcp_analyzer, {{
         arg bus = 0, replyRate = 10, replyID = 1001;
         var in, mono, fft;
         var freq, hasFreq, centroid, flatness, rolloff;
@@ -95,10 +112,10 @@ fork {
             spectrumBands,
             replyID
         );
-    }).add;
+    }}).add;
 
     // Simple peak/RMS meter only (lighter weight)
-    SynthDef(\mcp_meter, {
+    SynthDef(\mcp_meter, {{
         arg bus = 0, replyRate = 20, replyID = 1002;
         var in, peakL, peakR, rmsL, rmsR;
 
@@ -114,42 +131,42 @@ fork {
             [peakL, peakR, rmsL, rmsR],
             replyID
         );
-    }).add;
+    }}).add;
 
     "MCP SynthDefs loaded".postln;
-};  // end fork
+}};  // end fork
 
 // OSC forwarding: relay SendReply messages from scsynth to MCP Python server
-// SendReply sends to sclang (port 57120), we forward to MCP (port 57130)
-~mcpAddr = NetAddr("127.0.0.1", 57130);
+// SendReply sends to sclang (port 57120), we forward to MCP (port {reply_port})
+~mcpAddr = NetAddr("127.0.0.1", {reply_port});
 
-OSCFunc({ |msg|
+OSCFunc({{ |msg|
     ~mcpAddr.sendMsg(*msg);
-}, '/mcp/analysis');
+}}, '/mcp/analysis');
 
-OSCFunc({ |msg|
+OSCFunc({{ |msg|
     ~mcpAddr.sendMsg(*msg);
-}, '/mcp/onset');
+}}, '/mcp/onset');
 
-OSCFunc({ |msg|
+OSCFunc({{ |msg|
     ~mcpAddr.sendMsg(*msg);
-}, '/mcp/spectrum');
+}}, '/mcp/spectrum');
 
-OSCFunc({ |msg|
+OSCFunc({{ |msg|
     ~mcpAddr.sendMsg(*msg);
-}, '/mcp/meter');
+}}, '/mcp/meter');
 
 // Code execution responder - allows Python to execute SC code via OSC
 // This avoids spawning fresh sclang processes (which require class library recompilation)
-// Listen on port 57122 to avoid conflict with IDE's sclang
-OSCFunc({ |msg|
+// Listen on port {sclang_port} to avoid conflict with IDE's sclang
+OSCFunc({{ |msg|
     var requestId = msg[1].asInteger;
     var filePath = msg[2].asString;
     var code, result, success, output;
 
     // Outer try ensures we ALWAYS send a response (prevents Python timeout)
-    try {
-        try {
+    try {{
+        try {{
             // Read code from file
             code = File.readAllString(filePath);
 
@@ -158,42 +175,46 @@ OSCFunc({ |msg|
             result = thisProcess.interpreter.interpret(code);
 
             success = 1;
-            output = if(result.notNil) { result.asString } { "(nil)" };
+            output = if(result.notNil) {{ result.asString }} {{ "(nil)" }};
 
             // Truncate long outputs (OSC has ~8KB practical limit)
-            if(output.size > 7000) {
+            if(output.size > 7000) {{
                 output = output.keep(7000) ++ "... (truncated)";
-            };
-        } { |error|
+            }};
+        }} {{ |error|
             success = 0;
-            output = try { error.errorString } { "Unknown error" };
-            if(output.size > 7000) {
+            output = try {{ error.errorString }} {{ "Unknown error" }};
+            if(output.size > 7000) {{
                 output = output.keep(7000) ++ "... (truncated)";
-            };
-        };
+            }};
+        }};
 
         // Send result back to Python
-        if(~mcpAddr.notNil) {
+        if(~mcpAddr.notNil) {{
             ~mcpAddr.sendMsg('/mcp/eval/result', requestId, success, output);
-        } {
+        }} {{
             "ERROR: ~mcpAddr is nil, cannot send eval result".postln;
-        };
-    } { |outerError|
+        }};
+    }} {{ |outerError|
         // Last-ditch effort to send error response
         ("CRITICAL: Eval handler crashed: " ++ outerError.errorString).postln;
-        if(~mcpAddr.notNil) {
+        if(~mcpAddr.notNil) {{
             ~mcpAddr.sendMsg('/mcp/eval/result', requestId, 0,
-                "Internal error: " ++ try { outerError.errorString } { "unknown" }
+                "Internal error: " ++ try {{ outerError.errorString }} {{ "unknown" }}
             );
-        };
-    };
-}, '/mcp/eval', recvPort: 57122);
+        }};
+    }};
+}}, '/mcp/eval', recvPort: {sclang_port});
 
-"MCP sclang ready with OSC forwarding and code execution on port 57122".postln;
+"MCP sclang ready with OSC forwarding and code execution on port {sclang_port}".postln;
 
 // Keep sclang running indefinitely
-{ inf.wait }.defer;
+{{ inf.wait }}.defer;
 '''
+
+
+# For backwards compatibility, provide the default init code as a constant
+SCLANG_INIT_CODE = get_sclang_init_code(SCLANG_OSC_PORT, REPLY_PORT)
 
 # Prefixes to filter from sclang stderr (startup noise)
 SCLANG_STDERR_SKIP_PREFIXES = (

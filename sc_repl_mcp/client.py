@@ -17,8 +17,8 @@ from .config import (
     SCSYNTH_PORT,
     REPLY_PORT,
     SCLANG_OSC_PORT,
-    SCLANG_INIT_CODE,
     SPECTRUM_BAND_FREQUENCIES,
+    get_sclang_init_code,
 )
 from .types import LogEntry, ServerStatus, AnalysisData, OnsetEvent, SpectrumData, ReferenceSnapshot
 from .utils import freq_to_note, amp_to_db, kill_process_on_port
@@ -310,12 +310,14 @@ class SCClient:
 
         try:
             # Write init code to a temp file (sclang doesn't support -e flag)
+            # Generate init code with the configured ports for multi-instance support
+            init_code = get_sclang_init_code(SCLANG_OSC_PORT, REPLY_PORT)
             with tempfile.NamedTemporaryFile(
                 mode='w',
                 suffix='.scd',
                 delete=False,
             ) as f:
-                f.write(SCLANG_INIT_CODE)
+                f.write(init_code)
                 self._sclang_init_file = f.name
 
             # Start sclang with the init file
