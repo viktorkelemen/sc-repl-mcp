@@ -72,20 +72,29 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
 
     # sclang doesn't support -e flag, so we write code to a temp file
     # Prepend server connection code so SynthDefs are added to the correct server
-    # Use fork with s.sync to ensure server is ready, then delay before exit
+    # Wrap user code in try-catch to ensure errors don't cause hangs
     server_connect = """
 // Connect to the existing scsynth server (running in SuperCollider.app)
 Server.default = Server.remote(\\scsynth, NetAddr("127.0.0.1", 57110));
 s = Server.default;
 """
-    code_footer = """
+    # Wrap user code in try-catch to catch errors and ensure clean exit
+    # This prevents hangs when user code throws exceptions
+    code_wrapper_start = """
+try {
+"""
+    code_wrapper_end = """
+} { |error|
+    "ERROR: ".post;
+    error.errorString.postln;
+};
 0.exit;
 """
     # Ensure code ends with semicolon
     code_stripped = code.rstrip()
     if not code_stripped.endswith(';'):
         code_stripped += ';'
-    code_with_exit = server_connect + code_stripped + code_footer
+    code_with_exit = server_connect + code_wrapper_start + code_stripped + code_wrapper_end
 
     temp_path = None
     proc = None

@@ -9,6 +9,7 @@ SCLANG_OSC_PORT = 57122  # Fixed port for MCP sclang (avoids conflict with IDE's
 # Execution limits
 MAX_EVAL_TIMEOUT = 300.0  # Maximum allowed timeout (5 minutes)
 VALIDATE_TIMEOUT = 10.0  # Timeout for syntax validation (seconds)
+FRESH_PROCESS_STARTUP_BUFFER = 10.0  # Extra time added to timeout for fresh sclang startup (seconds)
 
 # Spectrum analyzer band frequencies (Hz) - logarithmic spacing from ~60Hz to ~16kHz
 # These must match between Python (client.py) and SuperCollider (config.py, mcp_synthdefs.scd)

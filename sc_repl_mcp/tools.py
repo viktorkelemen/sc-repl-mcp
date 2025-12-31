@@ -6,6 +6,7 @@ from typing import Any, Optional
 from mcp.server.fastmcp import FastMCP
 
 from .client import SCClient
+from .config import FRESH_PROCESS_STARTUP_BUFFER
 from .sclang import eval_sclang
 
 # Global client instance
@@ -297,14 +298,18 @@ def sc_eval(code: str, timeout: float = 120.0) -> str:
     if sc_client.is_sclang_ready():
         success, output = sc_client.eval_code(code, timeout=timeout)
         method = "persistent"
+        hint = ""
     else:
         # Fall back to spawning fresh sclang process
-        success, output = eval_sclang(code, timeout=timeout)
+        # Add startup buffer to account for class library compilation time
+        effective_timeout = timeout + FRESH_PROCESS_STARTUP_BUFFER
+        success, output = eval_sclang(code, timeout=effective_timeout)
         method = "fresh process"
+        hint = "\nHint: Call sc_connect() first for faster execution (~10ms vs 2-5s startup)."
 
     if success:
-        return f"Executed successfully ({method}):\n{output}"
-    return f"Error ({method}):\n{output}"
+        return f"Executed successfully ({method}):\n{output}{hint}"
+    return f"Error ({method}):\n{output}{hint}"
 
 
 @mcp.tool()

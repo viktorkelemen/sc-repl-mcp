@@ -358,17 +358,20 @@ class TestScEval:
         assert "Error" in result
         assert "Parse error" in result
 
-    def test_passes_timeout(self, mocker):
-        """Should pass timeout to eval_sclang."""
+    def test_passes_timeout_with_startup_buffer(self, mocker):
+        """Should pass timeout + startup buffer to eval_sclang for fresh process."""
         mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
         mock_client.is_sclang_ready.return_value = False
         mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
         mock_eval.return_value = (True, "")
 
+        from sc_repl_mcp.config import FRESH_PROCESS_STARTUP_BUFFER
         from sc_repl_mcp.tools import sc_eval
         sc_eval(code="test", timeout=60.0)
 
-        mock_eval.assert_called_once_with("test", timeout=60.0)
+        # Fresh process gets extra time for class library compilation
+        expected_timeout = 60.0 + FRESH_PROCESS_STARTUP_BUFFER
+        mock_eval.assert_called_once_with("test", timeout=expected_timeout)
 
     def test_uses_persistent_sclang_when_ready(self, mocker):
         """Should use persistent sclang when available."""
@@ -394,6 +397,31 @@ class TestScEval:
 
         mock_eval.assert_called_once()
         assert "fresh process" in result
+
+    def test_shows_hint_for_fresh_process(self, mocker):
+        """Should show hint suggesting sc_connect when using fresh process."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = False
+        mock_eval = mocker.patch("sc_repl_mcp.tools.eval_sclang")
+        mock_eval.return_value = (True, "42")
+
+        from sc_repl_mcp.tools import sc_eval
+        result = sc_eval(code="1 + 1")
+
+        assert "sc_connect()" in result
+        assert "Hint:" in result
+
+    def test_no_hint_for_persistent_sclang(self, mocker):
+        """Should not show hint when using persistent sclang."""
+        mock_client = mocker.patch("sc_repl_mcp.tools.sc_client")
+        mock_client.is_sclang_ready.return_value = True
+        mock_client.eval_code.return_value = (True, "42")
+
+        from sc_repl_mcp.tools import sc_eval
+        result = sc_eval(code="1 + 1")
+
+        assert "Hint:" not in result
+        assert "persistent" in result
 
 
 class TestScGetLogs:

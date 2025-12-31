@@ -200,6 +200,33 @@ ACTUAL ERROR: something went wrong"""
         # Code should end with semicolon before the exit footer
         assert "1 + 1;" in written_content
 
+    def test_wraps_code_in_try_catch(self, mocker):
+        """Should wrap user code in try-catch to prevent hangs on errors."""
+        mocker.patch("sc_repl_mcp.sclang.find_sclang", return_value="/usr/bin/sclang")
+
+        mock_file = mocker.mock_open()
+        mocker.patch("tempfile.NamedTemporaryFile", mock_file)
+
+        mock_proc = mocker.Mock()
+        mock_proc.communicate.return_value = ("", "")
+        mock_proc.returncode = 0
+        mocker.patch("subprocess.Popen", return_value=mock_proc)
+        mocker.patch("os.unlink")
+
+        eval_sclang("someCode.execute")
+
+        # Check what was written to the temp file
+        written_content = "".join(call.args[0] for call in mock_file().write.call_args_list)
+
+        # Should have try-catch wrapper
+        assert "try {" in written_content
+        assert "} { |error|" in written_content
+        assert "error.errorString" in written_content
+        # User code should be inside the try block
+        assert "someCode.execute" in written_content
+        # Should always exit cleanly
+        assert "0.exit;" in written_content
+
     def test_caps_timeout_to_max(self, mocker):
         """Should cap timeout to MAX_EVAL_TIMEOUT."""
         mocker.patch("sc_repl_mcp.sclang.find_sclang", return_value="/usr/bin/sclang")
