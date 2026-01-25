@@ -5,7 +5,6 @@ import sys
 
 # Network configuration
 SCSYNTH_HOST = "127.0.0.1"
-SCSYNTH_PORT = 57110  # scsynth audio server (not configurable, shared by all instances)
 
 
 def _parse_port(env_var: str, default: int) -> int:
@@ -45,8 +44,9 @@ def _parse_port(env_var: str, default: int) -> int:
 
 
 # Configurable ports for multi-instance support
-# Set SC_REPLY_PORT and SC_SCLANG_PORT environment variables to run multiple
-# MCP instances connecting to the same SuperCollider server
+# Set environment variables to connect to non-default SuperCollider instances
+# or to run multiple MCP instances
+SCSYNTH_PORT = _parse_port("SC_SCSYNTH_PORT", 57110)  # scsynth audio server
 REPLY_PORT = _parse_port("SC_REPLY_PORT", 57130)  # OSC replies from scsynth/sclang
 SCLANG_OSC_PORT = _parse_port("SC_SCLANG_PORT", 57122)  # MCP sclang (avoids IDE's 57120)
 
@@ -75,7 +75,7 @@ def get_sclang_init_code(sclang_port: int, reply_port: int) -> str:
     return rf'''
 // Connect to the existing scsynth server (running in SuperCollider.app)
 // This ensures SynthDefs are added to the correct server
-Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", 57110));
+Server.default = Server.remote(\scsynth, NetAddr("127.0.0.1", {SCSYNTH_PORT}));
 s = Server.default;
 // Server.remote handles connection automatically
 

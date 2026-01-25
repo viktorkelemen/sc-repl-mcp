@@ -317,8 +317,9 @@ class SCClient:
                 suffix='.scd',
                 delete=False,
             ) as f:
-                f.write(init_code)
+                # Capture path before write so cleanup works even if write fails
                 self._sclang_init_file = f.name
+                f.write(init_code)
 
             # Start sclang with the init file
             # Use DEVNULL to avoid pipe buffer deadlock (sclang output can exceed 64KB)

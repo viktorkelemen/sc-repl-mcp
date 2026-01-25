@@ -24,6 +24,7 @@ Multiple MCP server instances can connect to the same SuperCollider server using
 
 | Environment Variable | Default | Purpose |
 |---------------------|---------|---------|
+| `SC_SCSYNTH_PORT` | 57110 | Port for scsynth audio server |
 | `SC_REPLY_PORT` | 57130 | Port for receiving OSC replies from sclang |
 | `SC_SCLANG_PORT` | 57122 | Port for sclang to listen on |
 
@@ -32,7 +33,10 @@ Example for running a second instance:
 SC_REPLY_PORT=57131 SC_SCLANG_PORT=57123 uv run python sc_repl_mcp.py
 ```
 
-All instances share the same scsynth audio engine (port 57110).
+Example connecting to a non-default scsynth:
+```bash
+SC_SCSYNTH_PORT=57200 uv run python sc_repl_mcp.py
+```
 
 ## SuperCollider Verification
 

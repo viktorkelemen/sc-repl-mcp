@@ -8,7 +8,7 @@ import re
 import tempfile
 from typing import Optional
 
-from .config import MAX_EVAL_TIMEOUT, SCLANG_STDERR_SKIP_PREFIXES, VALIDATE_TIMEOUT
+from .config import MAX_EVAL_TIMEOUT, SCSYNTH_PORT, SCLANG_STDERR_SKIP_PREFIXES, VALIDATE_TIMEOUT
 
 
 def find_sclang() -> Optional[str]:
@@ -73,9 +73,9 @@ def eval_sclang(code: str, timeout: float = 30.0) -> tuple[bool, str]:
     # sclang doesn't support -e flag, so we write code to a temp file
     # Prepend server connection code so SynthDefs are added to the correct server
     # Wrap user code in try-catch to ensure errors don't cause hangs
-    server_connect = """
+    server_connect = f"""
 // Connect to the existing scsynth server (running in SuperCollider.app)
-Server.default = Server.remote(\\scsynth, NetAddr("127.0.0.1", 57110));
+Server.default = Server.remote(\\scsynth, NetAddr("127.0.0.1", {SCSYNTH_PORT}));
 s = Server.default;
 """
     # Wrap user code in try-catch to catch errors and ensure clean exit
